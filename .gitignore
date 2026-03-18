@@ -1,0 +1,89 @@
+# ---- OS / Editor ----
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.lnk
+.vscode/
+.idea/
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Env / secrets ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+pip-wheel-metadata/
+.python-version
+venv/
+.venv/
+ENV/
+env/
+
+# ---- Jupyter / data science ----
+.ipynb_checkpoints/
+*.pkl
+*.joblib
+*.h5
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+data/
+datasets/
+artifacts/
+models/
+
+# ---- Node / frontend ----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.turbo/
+.parcel-cache/
+.vite/
+dist/
+build/
+
+# ---- Docker ----
+**/.docker/
+
+# ---- Neo4j ----
+neo4j/data/
+neo4j/logs/
+
+# ---- Kafka ----
+kafka/data/
+
+# ---- Postgres ----
+postgres-data/
+
