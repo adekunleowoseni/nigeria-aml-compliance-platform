@@ -23,6 +23,7 @@ from app.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.db.neo4j_client import Neo4jClient
 from app.db.postgres_client import PostgresClient
+from app.services.customer_kyc_db import ensure_aml_customer_kyc_table
 
 log = get_logger(component="app")
 
@@ -36,6 +37,10 @@ async def startup_event(app: FastAPI) -> None:
 
     app.state.pg = PostgresClient(settings.postgres_url)
     await app.state.pg.connect()
+    try:
+        await ensure_aml_customer_kyc_table(app.state.pg)
+    except Exception:
+        log.exception("aml_customer_kyc_schema_failed")
 
     app.state.neo4j = Neo4jClient(settings.neo4j_uri, settings.neo4j_user, settings.neo4j_password)
     try:

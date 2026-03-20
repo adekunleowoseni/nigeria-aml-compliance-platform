@@ -30,3 +30,18 @@ class PostgresClient:
         async with self._pool.acquire() as conn:
             return await conn.fetchval(query, *args)
 
+    async def execute(self, query: str, *args: Any) -> str:
+        if self._pool is None:
+            raise RuntimeError("Postgres pool not initialized")
+        async with self._pool.acquire() as conn:
+            return await conn.execute(query, *args)
+
+    async def fetchrow(self, query: str, *args: Any) -> Optional[dict[str, Any]]:
+        if self._pool is None:
+            raise RuntimeError("Postgres pool not initialized")
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(query, *args)
+            if row is None:
+                return None
+            return dict(row)
+

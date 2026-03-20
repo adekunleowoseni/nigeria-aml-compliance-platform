@@ -4,12 +4,13 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 
 from app.api.v1.alerts import _ALERTS
 from app.api.v1.transactions import _TXNS
 from app.core.security import get_current_user
+from app.services.customer_kyc_db import get_or_create_customer_kyc
 from app.services.str_word_generator import render_str_docx_bytes
 from app.services.xml_generator import GoAMLGenerator
 
@@ -137,8 +138,19 @@ async def regenerate_str(report_id: str, payload: Dict[str, Any], user: Dict[str
     return {"report_id": report_id, "xml_preview": xml_preview, "validation_passed": True}
 
 
+def _approver_display_name(user: Dict[str, Any]) -> str:
+    return (
+        str(user.get("display_name") or "").strip()
+        or str(user.get("name") or "").strip()
+        or str(user.get("email") or "").strip()
+        or str(user.get("sub") or "").strip()
+        or "Authorized Officer"
+    )
+
+
 @router.get("/str/{report_id}/download")
 async def download_str(
+    request: Request,
     report_id: str,
     format: str = "word",
     user: Dict[str, Any] = Depends(get_current_user),
@@ -162,7 +174,14 @@ async def download_str(
     txn_dict = r.get("txn") or {}
     alert_context = r.get("alert") or {}
     customer_id = r.get("customer_id") or alert_context.get("customer_id") or ""
-    doc_bytes = render_str_docx_bytes(customer_id=customer_id, txn=txn_dict, alert=alert_context)
+    pg = getattr(request.app.state, "pg", None)
+    customer = await get_or_create_customer_kyc(pg, customer_id, txn_dict)
+    doc_bytes = render_str_docx_bytes(
+        customer=customer,
+        txn=txn_dict,
+        alert=alert_context,
+        approver_name=_approver_display_name(user),
+    )
     return Response(
         content=doc_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

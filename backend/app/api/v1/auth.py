@@ -64,7 +64,11 @@ async def login(body: LoginBody) -> LoginResponse:
         )
     token = create_access_token(
         user["email"],
-        extra={"role": user["role"], "email": user["email"]},
+        extra={
+            "role": user["role"],
+            "email": user["email"],
+            "display_name": user.get("display_name") or user["email"].split("@")[0],
+        },
     )
     return LoginResponse(
         access_token=token,

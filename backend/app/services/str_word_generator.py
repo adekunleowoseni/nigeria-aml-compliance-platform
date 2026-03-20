@@ -243,6 +243,29 @@ def build_customer_kyc(
     )
 
 
+def infer_line_of_business_from_txn(txn: Dict[str, Any]) -> Optional[str]:
+    """Infer LOB label from transaction metadata (simulation / profile hints)."""
+    inferred_lob: Optional[str] = None
+    meta = txn.get("metadata") or {}
+    if isinstance(meta, dict):
+        profile_label = meta.get("profile") or meta.get("pattern")
+        if profile_label:
+            pl = str(profile_label).lower()
+            if "salary" in pl or "worker" in pl or "salaried" in pl:
+                inferred_lob = "Civil Servant"
+            elif "student" in pl:
+                inferred_lob = "Student"
+            elif "trader" in pl or "sme" in pl:
+                inferred_lob = "SME Trader"
+            elif "hnwi" in pl or "high_net_worth" in pl or "high net" in pl:
+                inferred_lob = "Business Owner"
+            elif "merchant" in pl:
+                inferred_lob = "Merchant"
+            elif "import" in pl or "logistics" in pl:
+                inferred_lob = "Logistics / Importer"
+    return inferred_lob
+
+
 def _build_str_text(
     *,
     customer: CustomerKyc,
@@ -329,12 +352,14 @@ def _build_str_text(
 
 def render_str_docx_bytes(
     *,
-    customer_id: str,
+    customer: CustomerKyc,
     txn: Dict[str, Any],
     alert: Dict[str, Any],
+    approver_name: str,
 ) -> bytes:
     """
     Render an STR in the same overall format as the user's provided NFIU goAML template.
+    Customer KYC must be resolved (e.g. from DB) by the caller.
     """
     scenario = None
     rule_ids = alert.get("rule_ids") or []
@@ -344,27 +369,6 @@ def render_str_docx_bytes(
                 scenario = rid.replace("SIM-", "")
                 break
 
-    inferred_lob: Optional[str] = None
-    meta = txn.get("metadata") or {}
-    if isinstance(meta, dict):
-        profile_label = meta.get("profile") or meta.get("pattern")
-        if profile_label:
-            # Map known simulation metadata patterns to an AML-friendly LOB label.
-            pl = str(profile_label).lower()
-            if "salary" in pl or "worker" in pl or "salaried" in pl:
-                inferred_lob = "Civil Servant"
-            elif "student" in pl:
-                inferred_lob = "Student"
-            elif "trader" in pl or "sme" in pl:
-                inferred_lob = "SME Trader"
-            elif "hnwi" in pl or "high_net_worth" in pl or "high net" in pl:
-                inferred_lob = "Business Owner"
-            elif "merchant" in pl:
-                inferred_lob = "Merchant"
-            elif "import" in pl or "logistics" in pl:
-                inferred_lob = "Logistics / Importer"
-
-    customer = build_customer_kyc(customer_id, inferred_lob=inferred_lob, use_placeholders=True)
     text = _build_str_text(customer=customer, txn=txn, alert=alert, scenario=scenario)
     amount_currency = _format_money_with_currency(float(txn.get("amount") or 0.0))
 
@@ -438,7 +442,7 @@ def render_str_docx_bytes(
     doc.add_paragraph("APPROVAL")
     doc.add_paragraph("I have reviewed and confirmed that my comments have been incorporated. I am approving the filing of an STR/SAR with the NFIU.")
     doc.add_paragraph("APPROVER: _______________________________")
-    doc.add_paragraph("XXXXXXXXXXXXXXXX")
+    doc.add_paragraph(approver_name.strip() or "Authorized Officer")
     doc.add_paragraph(f"DATE: {datetime.utcnow().strftime('%B')} {datetime.utcnow().day}, {datetime.utcnow().year}")
 
     out = BytesIO()
