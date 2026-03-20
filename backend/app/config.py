@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
+    # If true, API accepts requests without Bearer token in development (demo-user).
+    # Set false to require login (recommended with the admin login UI).
+    allow_anonymous_dev: bool = False
+
     postgres_url: str = "postgresql://postgres:postgres@postgres:5432/aml_platform"
     neo4j_uri: str = "bolt://neo4j:7687"
     neo4j_user: str = "neo4j"

@@ -31,7 +31,7 @@ export default function Header() {
   const handleLogout = () => {
     logout();
     setDropdownOpen(false);
-    navigate('/');
+    navigate('/login');
   };
 
   const handleAccountSettings = () => {

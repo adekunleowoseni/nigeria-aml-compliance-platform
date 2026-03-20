@@ -100,6 +100,17 @@ export default function Dashboard() {
     },
   });
 
+  const simulate10yrMutation = useMutation({
+    mutationFn: () => demoApi.simulateTemporal(),
+    onSuccess: async () => {
+      queryClient.invalidateQueries({ queryKey: ['alerts'] });
+      queryClient.invalidateQueries({ queryKey: ['alerts-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      navigate('/alerts');
+    },
+  });
+
   return (
     <DashboardLayout>
       <h1 className="text-2xl font-bold text-slate-900 mb-6">Dashboard</h1>
@@ -158,6 +169,8 @@ export default function Dashboard() {
               <PieChart>
                 <Pie
                   data={riskDistribution}
+                  dataKey="value"
+                  nameKey="name"
                   cx="50%"
                   cy="50%"
                   labelLine={false}
@@ -230,6 +243,15 @@ export default function Dashboard() {
             </button>
             <button
               type="button"
+              onClick={() => simulate10yrMutation.mutate()}
+              disabled={simulate10yrMutation.isPending || seedDemoMutation.isPending}
+              className="px-4 py-2 bg-teal-700 text-white rounded hover:bg-teal-800 disabled:opacity-50"
+              title="Simulate 10 years per customer, learn patterns, inject all AML scenarios (1–2 min)"
+            >
+              {simulate10yrMutation.isPending ? 'Simulating 10 years…' : 'Simulate 10-year history'}
+            </button>
+            <button
+              type="button"
               onClick={() => navigate('/alerts')}
               className="px-4 py-2 bg-slate-200 text-slate-800 rounded hover:bg-slate-300"
             >
@@ -244,6 +266,11 @@ export default function Dashboard() {
           {seedDemoMutation.isError && (
             <p className="mt-3 text-sm text-red-600">
               Failed to seed demo data: {(seedDemoMutation.error as Error).message}
+            </p>
+          )}
+          {simulate10yrMutation.isError && (
+            <p className="mt-3 text-sm text-red-600">
+              Simulation failed: {(simulate10yrMutation.error as Error).message}
             </p>
           )}
         </div>

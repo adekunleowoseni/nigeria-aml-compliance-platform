@@ -1,15 +1,68 @@
-// Use full URL when set (e.g. VITE_API_URL=http://localhost:8002/api/v1); otherwise use relative for proxy
-const BASE = import.meta.env.VITE_API_URL || '/api/v1';
+import { useAuthStore } from '../store/authStore';
+
+// Use full URL when set. If only host (e.g. http://localhost:8002), append /api/v1
+const rawBase = import.meta.env.VITE_API_URL || '';
+const BASE = rawBase
+  ? (rawBase.startsWith('http') && !rawBase.includes('/api/v1')
+    ? `${rawBase.replace(/\/$/, '')}/api/v1`
+    : rawBase.replace(/\/$/, ''))
+  : '/api/v1';
+
+function getBearerToken(): string | null {
+  return useAuthStore.getState().token;
+}
+
+async function parseErrorMessage(res: Response): Promise<string> {
+  let msg = res.statusText || 'Request failed';
+  try {
+    const j = (await res.json()) as { detail?: string | unknown };
+    if (j?.detail != null) {
+      msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail);
+    }
+  } catch {
+    try {
+      const t = await res.text();
+      if (t) msg = t.slice(0, 200);
+    } catch {
+      /* ignore */
+    }
+  }
+  return msg;
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const url = path.startsWith('http') ? path : `${BASE}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-  });
-  if (!res.ok) throw new Error(res.statusText);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(options?.headers as Record<string, string>) };
+  const token = getBearerToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(url, { ...options, headers });
+  if (!res.ok) throw new Error(await parseErrorMessage(res));
   return res.json() as Promise<T>;
 }
+
+export type LoginResponse = {
+  access_token: string;
+  token_type: string;
+  user: { email: string; role: string; display_name: string };
+};
+
+export const authApi = {
+  async login(email: string, password: string): Promise<LoginResponse> {
+    const url = `${BASE.replace(/\/$/, '')}/auth/login`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) throw new Error(await parseErrorMessage(res));
+    return res.json() as Promise<LoginResponse>;
+  },
+  changePassword: (body: { current_password: string; new_password: string }) =>
+    request<{ status: string; message: string }>('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+};
 
 /** Trigger browser download of a blob with the given filename. */
 function downloadBlob(blob: Blob, filename: string) {
@@ -150,7 +203,10 @@ export const reportsApi = {
   /** Download STR as Word or XML (NFIU goAML). */
   async downloadSTR(reportId: string, format: 'word' | 'xml') {
     const url = `${BASE.replace(/\/$/, '')}/reports/str/${encodeURIComponent(reportId)}/download?format=${format}`;
-    const res = await fetch(url);
+    const token = getBearerToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(url, { headers });
     if (!res.ok) throw new Error(res.statusText);
     const blob = await res.blob();
     const disposition = res.headers.get('Content-Disposition');
@@ -160,7 +216,10 @@ export const reportsApi = {
   /** Download CTR as Word or XML (NFIU goAML). */
   async downloadCTR(reportId: string, format: 'word' | 'xml') {
     const url = `${BASE.replace(/\/$/, '')}/reports/ctr/${encodeURIComponent(reportId)}/download?format=${format}`;
-    const res = await fetch(url);
+    const token = getBearerToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(url, { headers });
     if (!res.ok) throw new Error(res.statusText);
     const blob = await res.blob();
     const disposition = res.headers.get('Content-Disposition');
@@ -169,6 +228,37 @@ export const reportsApi = {
   },
 };
 
+export type TemporalSimulationResult = {
+  total_generated: number;
+  year_span: number;
+  customers: number;
+  scenario_counts: Record<string, number>;
+  seed: number;
+  approx_start: string;
+  approx_end: string;
+  alerts_created: number;
+  stored_transactions: number;
+};
+
 export const demoApi = {
   seed: () => request<{ seeded_transactions: number; transaction_ids: string[] }>('/demo/seed', { method: 'POST' }),
+  /** ~10 years of synthetic history per customer + AML scenarios; may take 1–2 minutes. */
+  simulateTemporal: (body?: {
+    years?: number;
+    seed?: number;
+    clear_existing?: boolean;
+    max_transactions?: number;
+    refit_every?: number;
+  }) =>
+    request<TemporalSimulationResult>('/demo/simulate-temporal', {
+      method: 'POST',
+      body: JSON.stringify({
+        years: 10,
+        seed: 42,
+        clear_existing: true,
+        max_transactions: 100_000,
+        refit_every: 500,
+        ...body,
+      }),
+    }),
 };

@@ -29,11 +29,22 @@ def _decode_token(token: str) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from e
 
 
+def _default_dev_user() -> Dict[str, Any]:
+    return {"sub": "demo-user", "role": "compliance_officer"}
+
+
 async def get_current_user(
     request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ) -> Dict[str, Any]:
     if creds is None:
+        if (
+            settings.allow_anonymous_dev
+            and settings.app_env.strip().lower() == "development"
+        ):
+            user = _default_dev_user()
+            request.state.user = user
+            return user
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
     payload = _decode_token(creds.credentials)
     request.state.user = payload

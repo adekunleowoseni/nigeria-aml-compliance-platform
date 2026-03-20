@@ -1,19 +1,27 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
+export type AuthUser = {
+  displayName: string;
+  email?: string;
+  role?: string;
+};
+
 interface AuthState {
-  user: { displayName: string; email?: string } | null;
-  setUser: (user: { displayName: string; email?: string } | null) => void;
+  token: string | null;
+  user: AuthUser | null;
+  setSession: (token: string, user: AuthUser) => void;
   logout: () => void;
 }
 
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
-      user: { displayName: 'User', email: 'user@aml-platform.ng' },
-      setUser: (user) => set({ user }),
-      logout: () => set({ user: null }),
+      token: null,
+      user: null,
+      setSession: (token, user) => set({ token, user }),
+      logout: () => set({ token: null, user: null }),
     }),
-    { name: 'aml-auth' }
+    { name: 'aml-auth-v2' }
   )
 );

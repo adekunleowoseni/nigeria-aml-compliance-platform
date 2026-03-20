@@ -6,9 +6,12 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 
+from app.api.v1.alerts import _ALERTS
 from app.core.security import get_current_user
+from app.models.alert import AlertResponse
 from app.models.transaction import GraphResponse, TransactionCreate, TransactionResponse
-from app.services.anomaly_engine import assess_transaction
+from app.services.anomaly_engine import assess_transaction, compute_anomaly_score_bulk
+from app.services.temporal_simulation import generate_temporal_dataset
 
 router = APIRouter(prefix="/transactions")
 
@@ -18,17 +21,50 @@ _TXNS: Dict[str, TransactionResponse] = {}
 _JOBS: Dict[str, Dict[str, Any]] = {}
 
 
-async def _process_transaction_async(txn_id: str) -> None:
+def _prior_customer_baseline(txn: TransactionResponse) -> List[Dict[str, Any]]:
+    """Transactions for the same customer strictly before this event (10y pattern learning)."""
+    prior: List[TransactionResponse] = [
+        t
+        for t in _TXNS.values()
+        if t.customer_id == txn.customer_id and t.created_at < txn.created_at and t.id != txn.id
+    ]
+    return [t.model_dump() for t in prior]
+
+
+async def _process_transaction_async(txn_id: str, *, skip_llm: bool = False) -> None:
     txn = _TXNS.get(txn_id)
     if not txn:
         return
-    # Cognitive pipeline: IsolationForest anomaly scoring + optional LLM narrative.
-    baseline = [t.model_dump() for t in _TXNS.values()]
-    assessment = await assess_transaction(txn.model_dump(), baseline_txns=baseline, customer_profile={"role": "unknown"})
+    # Cognitive pipeline: IsolationForest on this customer's own history (plus optional global context).
+    baseline = _prior_customer_baseline(txn)
+    assessment = await assess_transaction(
+        txn.model_dump(),
+        baseline_txns=baseline,
+        customer_profile={"role": "unknown", "customer_id": txn.customer_id},
+        skip_llm=skip_llm,
+    )
     txn.risk_score = float(assessment.anomaly_score)
-    if assessment.triggered and assessment.llm_summary:
-        # stash narrative in a loosely-typed field until persistence layer is added
-        txn.metadata = {"decision_support_summary": assessment.llm_summary, "trigger_reason": assessment.reason}  # type: ignore[attr-defined]
+    if assessment.triggered:
+        md = dict(txn.metadata or {})
+        if assessment.llm_summary:
+            md["decision_support_summary"] = assessment.llm_summary
+            md["trigger_reason"] = assessment.reason
+        txn.metadata = md
+        # Create an alert so it appears in alerts list and dashboard
+        scenario = (txn.metadata or {}).get("simulation_scenario") if txn.metadata else None
+        summary = assessment.llm_summary or (f"[{scenario}] " if scenario else "") + (
+            txn.narrative or "Anomaly detected vs customer baseline"
+        )
+        alert = AlertResponse(
+            transaction_id=txn.id,
+            customer_id=txn.customer_id,
+            severity=assessment.anomaly_score,
+            status="open",
+            rule_ids=["RULE-ANOMALY"] + ([f"SIM-{scenario}"] if scenario else []),
+            summary=summary[:500],
+        )
+        _ALERTS[alert.id] = alert
+        txn.alert_id = alert.id
     txn.status = "processed"
     txn.updated_at = datetime.utcnow()
     _TXNS[txn_id] = txn
@@ -45,6 +81,8 @@ async def ingest_transaction(
         amount=body.amount,
         currency=body.currency,
         transaction_type=body.transaction_type,
+        narrative=body.narrative,
+        metadata=body.metadata,
         status="received",
         created_at=datetime.utcnow(),
     )
@@ -143,4 +181,72 @@ async def analyze_transaction(
         raise HTTPException(status_code=404, detail="Transaction not found")
     background.add_task(_process_transaction_async, transaction_id)
     return {"transaction_id": transaction_id, "status": "queued"}
+
+
+async def run_temporal_simulation(
+    *,
+    years: int = 10,
+    seed: int = 42,
+    clear_existing: bool = True,
+    max_transactions: int = 100_000,
+    refit_every: int = 500,
+) -> Dict[str, Any]:
+    """
+    Generate ~10 years of synthetic activity per customer, inject AML scenarios,
+    score chronologically vs each customer's own history (Isolation Forest with periodic refit).
+    """
+    if clear_existing:
+        _TXNS.clear()
+        _ALERTS.clear()
+
+    txns, summary = generate_temporal_dataset(years=years, seed=seed, max_transactions=max_transactions)
+
+    for t in txns:
+        _TXNS[t.id] = t
+
+    history_by_customer: Dict[str, List[Dict[str, Any]]] = {}
+    engine_state_by_customer: Dict[str, Dict[str, Any]] = {}
+    alerts_created = 0
+
+    for txn in txns:
+        cid = txn.customer_id
+        hist = history_by_customer.setdefault(cid, [])
+        baseline = list(hist)
+        st = engine_state_by_customer.setdefault(cid, {})
+
+        txn_dict = txn.model_dump()
+        assessment = compute_anomaly_score_bulk(
+            txn_dict,
+            baseline,
+            st,
+            refit_every=refit_every,
+        )
+
+        txn.risk_score = float(assessment.anomaly_score)
+        if assessment.triggered:
+            md = dict(txn.metadata or {})
+            md["trigger_reason"] = assessment.reason
+            txn.metadata = md
+            scenario = md.get("simulation_scenario")
+            summary_text = (f"[{scenario}] " if scenario else "") + (
+                txn.narrative or "Anomaly detected vs customer baseline"
+            )
+            alert = AlertResponse(
+                transaction_id=txn.id,
+                customer_id=txn.customer_id,
+                severity=assessment.anomaly_score,
+                status="open",
+                rule_ids=["RULE-ANOMALY"] + ([f"SIM-{scenario}"] if scenario else []),
+                summary=summary_text[:500],
+            )
+            _ALERTS[alert.id] = alert
+            txn.alert_id = alert.id
+            alerts_created += 1
+
+        txn.status = "processed"
+        txn.updated_at = datetime.utcnow()
+        _TXNS[txn.id] = txn
+        hist.append(txn_dict)
+
+    return {**summary, "alerts_created": alerts_created, "stored_transactions": len(_TXNS)}
 

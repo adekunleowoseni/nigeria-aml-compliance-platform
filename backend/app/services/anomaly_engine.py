@@ -22,6 +22,24 @@ class AnomalyAssessment:
     llm_summary: Optional[str] = None
 
 
+def _parse_hour_from_txn(txn: Dict[str, Any]) -> Optional[int]:
+    ts = txn.get("timestamp")
+    if isinstance(ts, datetime):
+        return ts.hour
+    ca = txn.get("created_at")
+    if isinstance(ca, datetime):
+        return ca.hour
+    if isinstance(ca, str):
+        try:
+            # ISO-8601 from JSON / model_dump(mode="json")
+            if "T" in ca:
+                h = ca.split("T", 1)[1]
+                return int(h.split(":", 1)[0])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
 def _features(txn: Dict[str, Any]) -> np.ndarray:
     """
     Feature vector for Isolation Forest.
@@ -30,10 +48,7 @@ def _features(txn: Dict[str, Any]) -> np.ndarray:
     amount = float(txn.get("amount") or 0.0)
     currency = (txn.get("currency") or "NGN").upper()
     tx_type = (txn.get("transaction_type") or "transfer").lower()
-    hour = None
-    ts = txn.get("timestamp")
-    if isinstance(ts, datetime):
-        hour = ts.hour
+    hour = _parse_hour_from_txn(txn)
     # Simple encoding
     currency_code = 1.0 if currency == "NGN" else 0.0
     is_wire = 1.0 if "wire" in tx_type else 0.0
@@ -76,10 +91,53 @@ class IsolationForestEngine:
         return float(np.clip(score, 0.0, 1.0))
 
 
+def score_transaction_for_bulk_simulation(
+    txn_dict: Dict[str, Any],
+    baseline: List[Dict[str, Any]],
+    engine_state: Dict[str, Any],
+    *,
+    refit_every: int = 500,
+) -> float:
+    """
+    Score one transaction using a per-customer Isolation Forest that refits periodically.
+    Used for large (e.g. 10-year) simulations without refitting on every row.
+    """
+    if len(baseline) < 50:
+        return IsolationForestEngine().score(txn_dict)
+
+    eng: IsolationForestEngine | None = engine_state.get("engine")
+    last_fit: int = int(engine_state.get("last_fit_size", 0))
+    need_refit = eng is None or not eng._fitted or (len(baseline) - last_fit) >= refit_every
+    if need_refit:
+        eng = IsolationForestEngine()
+        eng.fit_if_needed(baseline)
+        engine_state["engine"] = eng
+        engine_state["last_fit_size"] = len(baseline)
+    assert eng is not None
+    return eng.score(txn_dict)
+
+
+def compute_anomaly_score_bulk(
+    txn_dict: Dict[str, Any],
+    baseline: List[Dict[str, Any]],
+    engine_state: Dict[str, Any],
+    *,
+    refit_every: int = 500,
+) -> AnomalyAssessment:
+    s = score_transaction_for_bulk_simulation(txn_dict, baseline, engine_state, refit_every=refit_every)
+    triggered = s >= float(settings.anomaly_threshold)
+    reason = "IsolationForest anomaly score above threshold" if triggered else "No anomaly trigger"
+    if triggered:
+        reason = f"{reason} (bulk simulation; LLM skipped)"
+    return AnomalyAssessment(anomaly_score=s, triggered=triggered, reason=reason, llm_summary=None)
+
+
 async def assess_transaction(
     txn: Dict[str, Any],
     baseline_txns: List[Dict[str, Any]],
     customer_profile: Optional[Dict[str, Any]] = None,
+    *,
+    skip_llm: bool = False,
 ) -> AnomalyAssessment:
     engine = IsolationForestEngine()
     engine.fit_if_needed(baseline_txns)
@@ -88,7 +146,7 @@ async def assess_transaction(
     reason = "IsolationForest anomaly score above threshold" if triggered else "No anomaly trigger"
 
     llm_summary = None
-    if triggered:
+    if triggered and not skip_llm:
         llm = get_llm_client()
         profile_text = f"Customer profile: {customer_profile}" if customer_profile else "Customer profile: (unknown)"
         remarks = txn.get("narrative") or txn.get("remarks") or ""
@@ -105,6 +163,8 @@ async def assess_transaction(
             llm_summary = result.content.strip() or None
         except Exception:
             log.exception("llm_generate_failed")
+    elif triggered and skip_llm:
+        reason = f"{reason} (LLM skipped in bulk simulation)"
 
     return AnomalyAssessment(anomaly_score=s, triggered=triggered, reason=reason, llm_summary=llm_summary)
 

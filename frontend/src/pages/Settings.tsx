@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import DashboardLayout from '../components/layout/DashboardLayout';
+import { authApi } from '../services/api';
 
 export default function Settings() {
   const [currentPassword, setCurrentPassword] = useState('');
@@ -21,14 +22,19 @@ export default function Settings() {
     setLoading(true);
     setMessage(null);
     try {
-      // Placeholder: when backend has POST /auth/change-password, call it here
-      await new Promise((r) => setTimeout(r, 600));
+      await authApi.changePassword({
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
       setMessage({ type: 'success', text: 'Password updated successfully.' });
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-    } catch {
-      setMessage({ type: 'error', text: 'Failed to update password. Try again.' });
+    } catch (e) {
+      setMessage({
+        type: 'error',
+        text: e instanceof Error ? e.message : 'Failed to update password. Try again.',
+      });
     } finally {
       setLoading(false);
     }

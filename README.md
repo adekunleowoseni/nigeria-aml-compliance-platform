@@ -57,3 +57,10 @@ Then call APIs with:
 
 `Authorization: Bearer <token>`
 
+## 10-year transaction simulation (demo)
+
+For training-style behaviour, the backend can synthesise multi-year histories **per customer profile** (salaried worker, student, SME trader, HNWI, merchant, importer), then inject AML scenarios (smurfing, layering, structuring, velocity bursts, wire spikes, round-trips, cash/profile mismatch, channel anomalies). Each transaction is scored with an Isolation Forest refitted periodically on **that customer’s prior** transactions only.
+
+- **API:** `POST /api/v1/demo/simulate-temporal` with JSON body `{ "years": 10, "seed": 42, "clear_existing": true, "max_transactions": 100000, "refit_every": 500 }`
+- **UI:** Dashboard → **Simulate 10-year history** (may take 1–2 minutes for a full run)
+

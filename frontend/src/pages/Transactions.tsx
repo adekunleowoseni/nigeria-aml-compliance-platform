@@ -8,7 +8,15 @@ export default function Transactions() {
     queryFn: () => transactionsApi.list({ skip: 0, limit: 20 }),
   });
 
-  const items = list?.items ?? [];
+  type TxRow = {
+    id: string;
+    customer_id: string;
+    transaction_type: string;
+    amount: number;
+    risk_score?: number;
+    alert_id?: string;
+  };
+  const items = (list?.items ?? []) as TxRow[];
 
   return (
     <DashboardLayout>
@@ -44,7 +52,7 @@ export default function Transactions() {
                 <td colSpan={6} className="p-4 text-slate-500">No transactions</td>
               </tr>
             )}
-            {!isLoading && items.map((tx: { id: string; customer_id: string; transaction_type: string; amount: number; risk_score?: number; alert_id?: string }) => (
+            {!isLoading && items.map((tx) => (
               <tr key={tx.id} className="border-b border-slate-100 hover:bg-slate-50">
                 <td className="p-3 text-sm font-mono text-slate-600">{tx.id}</td>
                 <td className="p-3">{tx.customer_id}</td>
