@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
@@ -10,6 +10,7 @@ from fastapi.responses import Response
 from app.api.v1.alerts import _ALERTS
 from app.api.v1.transactions import _TXNS
 from app.core.security import get_current_user
+from app.services.alert_snapshot import build_alert_snapshot
 from app.services.customer_kyc_db import get_or_create_customer_kyc
 from app.services.str_word_generator import render_str_docx_bytes
 from app.services.xml_generator import GoAMLGenerator
@@ -62,7 +63,8 @@ async def generate_str(payload: Dict[str, Any], user: Dict[str, Any] = Depends(g
     )
 
     inflows_total, outflows_total = _compute_customer_cashflow_totals(alert.customer_id)
-    period_text = "January 1, 2025, to March 13, 2026"
+    now = datetime.utcnow()
+    period_text = f"{(now - timedelta(days=365)).strftime('%B %d, %Y')} to {now.strftime('%B %d, %Y')} (12-month window)"
 
     report_id = str(uuid4())
     xml_preview = _generator.generate_str(
@@ -122,7 +124,8 @@ async def regenerate_str(report_id: str, payload: Dict[str, Any], user: Dict[str
     txn_dict = txn.model_dump() if txn else r.get("txn") or {}
 
     inflows_total, outflows_total = _compute_customer_cashflow_totals(alert.customer_id)
-    period_text = "January 1, 2025, to March 13, 2026"
+    now = datetime.utcnow()
+    period_text = f"{(now - timedelta(days=365)).strftime('%B %d, %Y')} to {now.strftime('%B %d, %Y')} (12-month window)"
 
     xml_preview = _generator.generate_str(
         reporting_entity={"name": "Demo Reporting Entity", "registration_number": "RC-000000"},
@@ -176,11 +179,23 @@ async def download_str(
     customer_id = r.get("customer_id") or alert_context.get("customer_id") or ""
     pg = getattr(request.app.state, "pg", None)
     customer = await get_or_create_customer_kyc(pg, customer_id, txn_dict)
+    enrichment: Optional[Dict[str, Any]] = None
+    aid = r.get("alert_id")
+    alert_obj = _ALERTS.get(aid) if aid else None
+    if alert_obj:
+        all_tx = [t.model_dump() for t in _TXNS.values()]
+        enrichment = await build_alert_snapshot(
+            alert=alert_obj,
+            txn=txn_dict,
+            all_txn_dicts=all_tx,
+            pg=pg,
+        )
     doc_bytes = render_str_docx_bytes(
         customer=customer,
         txn=txn_dict,
         alert=alert_context,
         approver_name=_approver_display_name(user),
+        enrichment=enrichment,
     )
     return Response(
         content=doc_bytes,

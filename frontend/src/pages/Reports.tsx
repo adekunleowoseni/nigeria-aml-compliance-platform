@@ -254,7 +254,7 @@ export default function Reports() {
               id="str-alert-search"
               value={alertSearch}
               onChange={(e) => setAlertSearch(e.target.value)}
-              placeholder="e.g. demo-txn-wire-001 or CUST-NG-2002"
+              placeholder="e.g. DEMO-PERSON-ADESANYA or DEMO-WORKER-LAGOS"
               className="w-full rounded border border-slate-300 px-3 py-2 text-sm mb-3"
             />
             <select

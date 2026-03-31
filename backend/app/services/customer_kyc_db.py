@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.db.postgres_client import PostgresClient
 from app.services.str_word_generator import CustomerKyc, build_customer_kyc, infer_line_of_business_from_txn
 
 # Fallback when Postgres insert fails (e.g. readonly / transient errors)
 _MEMORY_KYC: Dict[str, CustomerKyc] = {}
+
+
+def clear_memory_kyc() -> None:
+    _MEMORY_KYC.clear()
 
 
 async def ensure_aml_customer_kyc_table(pg: PostgresClient) -> None:
@@ -122,3 +126,45 @@ async def get_or_create_customer_kyc(
 
     _MEMORY_KYC[cid] = synthetic
     return synthetic
+
+
+async def list_bvn_linked_accounts(
+    pg: Optional[PostgresClient],
+    id_number: str,
+    *,
+    primary_customer_id: str,
+) -> List[Dict[str, Any]]:
+    """All accounts (rows) sharing the same BVN / national ID in aml_customer_kyc."""
+    bvn = (id_number or "").strip()
+    out: List[Dict[str, Any]] = []
+    if pg is not None and bvn:
+        try:
+            rows = await pg.fetch(
+                "SELECT customer_id, account_number, customer_name FROM aml_customer_kyc "
+                "WHERE id_number = $1 ORDER BY customer_id",
+                bvn,
+            )
+            for r in rows:
+                out.append(
+                    {
+                        "customer_id": r["customer_id"],
+                        "account_number": r["account_number"],
+                        "customer_name": r["customer_name"],
+                        "bvn": bvn,
+                        "source": "database",
+                    }
+                )
+        except Exception:
+            pass
+    if not out and primary_customer_id in _MEMORY_KYC:
+        kyc = _MEMORY_KYC[primary_customer_id]
+        out.append(
+            {
+                "customer_id": primary_customer_id,
+                "account_number": kyc.account_number,
+                "customer_name": kyc.customer_name,
+                "bvn": kyc.id_number,
+                "source": "memory",
+            }
+        )
+    return out

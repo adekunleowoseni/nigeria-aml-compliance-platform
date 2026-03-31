@@ -12,7 +12,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   return (
     <div className="flex min-h-screen bg-slate-100">
       {sidebarOpen && (
-        <div className="flex-shrink-0">
+        <div className="flex-shrink-0 h-screen sticky top-0 self-start">
           <Sidebar />
         </div>
       )}

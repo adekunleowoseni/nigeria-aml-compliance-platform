@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 try:
     import asyncpg
@@ -44,4 +44,11 @@ class PostgresClient:
             if row is None:
                 return None
             return dict(row)
+
+    async def fetch(self, query: str, *args: Any) -> List[dict[str, Any]]:
+        if self._pool is None:
+            raise RuntimeError("Postgres pool not initialized")
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *args)
+            return [dict(r) for r in rows]
 

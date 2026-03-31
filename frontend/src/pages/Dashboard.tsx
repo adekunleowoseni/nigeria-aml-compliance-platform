@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import DashboardLayout from '../components/layout/DashboardLayout';
 import StatCard from '../components/dashboard/StatCard';
-import { dashboardApi, alertsApi, transactionsApi, demoApi } from '../services/api';
+import { dashboardApi, alertsApi, demoApi } from '../services/api';
 
 const PIE_COLORS: Record<string, string> = {
   Critical: '#ef4444',
@@ -69,15 +69,7 @@ export default function Dashboard() {
   const highRiskAlerts = (alertsList?.items ?? []).filter((a) => a.severity >= 0.8).slice(0, 5);
 
   const ingestMutation = useMutation({
-    mutationFn: () =>
-      transactionsApi.ingest({
-        customer_id: 'CUST-NG-9001',
-        amount: 10_000_000,
-        currency: 'NGN',
-        transaction_type: 'wire',
-        narrative: 'Demo anomalous transaction for ML alert generation.',
-        metadata: { scenario: 'profile_mismatch', fan_in_transfers_2h: 15 },
-      }),
+    mutationFn: () => demoApi.ingestFlagship(),
     onSuccess: async () => {
       // give the background task a moment then refresh alerts/metrics
       await new Promise((r) => setTimeout(r, 600));
@@ -215,6 +207,10 @@ export default function Dashboard() {
         </div>
         <div className="bg-white rounded-lg shadow p-4">
           <h3 className="font-semibold mb-4">Quick Actions</h3>
+          <p className="text-xs text-slate-500 mb-3">
+            Demo buttons replace prior in-memory transactions and alerts (and clear demo KYC in Postgres when connected)
+            so each run starts clean.
+          </p>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
@@ -228,7 +224,7 @@ export default function Dashboard() {
               onClick={() => ingestMutation.mutate()}
               disabled={ingestMutation.isPending}
               className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
-              title="Creates an ML alert using Isolation Forest"
+              title="Clears demo stores then ingests one high-signal wire (ministry memo / PEP-style)"
             >
               {ingestMutation.isPending ? 'Ingesting…' : 'Ingest demo suspicious txn'}
             </button>
@@ -237,7 +233,7 @@ export default function Dashboard() {
               onClick={() => seedDemoMutation.mutate()}
               disabled={seedDemoMutation.isPending}
               className="px-4 py-2 bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
-              title="Seed multiple AML scenarios (smurfing, layering, cash anomalies)"
+              title="Full reset + realistic Nigerian demo pack (IPPIS, smurfing, layering, tailor mismatch, crypto ref, etc.)"
             >
               {seedDemoMutation.isPending ? 'Seeding demo data…' : 'Run full AML demo'}
             </button>

@@ -187,6 +187,61 @@ export const alertsApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  /** Pre-resolution AML snapshot: transaction, customer, BVN-linked accounts, windows, typologies, screening. */
+  getSnapshot: (alertId: string) =>
+    request<Record<string, unknown>>(`/alerts/${encodeURIComponent(alertId)}/snapshot`),
+  notifyEdd: (
+    alertId: string,
+    body: {
+      customer_email: string;
+      customer_name?: string;
+      compliance_action?: 'investigate' | 'resolve' | 'escalate';
+      investigator_id?: string;
+      investigation_notes?: string;
+      resolution?: 'true_positive' | 'false_positive';
+      resolution_notes?: string;
+      escalate_reason?: string;
+      escalated_to?: string;
+      additional_note?: string;
+    }
+  ) =>
+    request<{ status: string; to: string; type: string; compliance_action?: string }>(
+      `/alerts/${encodeURIComponent(alertId)}/notify/edd`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    ),
+  notifyCco: (
+    alertId: string,
+    body: {
+      action: 'investigate' | 'resolve' | 'escalate';
+      investigator_id?: string;
+      investigation_notes?: string;
+      resolution?: 'true_positive' | 'false_positive';
+      resolution_notes?: string;
+      escalate_reason?: string;
+      escalated_to?: string;
+      additional_note?: string;
+      extra_recipients?: string[];
+    }
+  ) =>
+    request<{ status: string; to: string; type: string; action: string }>(
+      `/alerts/${encodeURIComponent(alertId)}/notify/cco`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }
+    ),
+};
+
+export const complianceApi = {
+  referenceJurisdictions: () =>
+    request<{ source: string; disclaimer: string; jurisdictions: Array<{ jurisdiction: string; note: string }> }>(
+      '/compliance/sanctions/reference-jurisdictions'
+    ),
+  screenSanctions: (name: string) =>
+    request<Record<string, unknown>>(`/compliance/sanctions/screen?name=${encodeURIComponent(name)}`),
 };
 
 export const reportsApi = {
@@ -241,12 +296,32 @@ export type TemporalSimulationResult = {
 };
 
 export const demoApi = {
-  seed: () => request<{ seeded_transactions: number; transaction_ids: string[] }>('/demo/seed', { method: 'POST' }),
+  /** Clears in-memory AML data (and optional Postgres KYC) then loads realistic demo scenarios. */
+  seed: (body?: { replace_existing?: boolean; clear_postgres_kyc?: boolean }) =>
+    request<{ seeded_transactions: number; transaction_ids: string[]; replaced?: boolean }>('/demo/seed', {
+      method: 'POST',
+      body: JSON.stringify({
+        replace_existing: true,
+        clear_postgres_kyc: true,
+        ...body,
+      }),
+    }),
+  /** One flagship suspicious transaction after optional full clear. */
+  ingestFlagship: (body?: { replace_existing?: boolean; clear_postgres_kyc?: boolean }) =>
+    request<{ transaction_id: string; replaced?: boolean }>('/demo/ingest-flagship', {
+      method: 'POST',
+      body: JSON.stringify({
+        replace_existing: true,
+        clear_postgres_kyc: true,
+        ...body,
+      }),
+    }),
   /** ~10 years of synthetic history per customer + AML scenarios; may take 1–2 minutes. */
   simulateTemporal: (body?: {
     years?: number;
     seed?: number;
     clear_existing?: boolean;
+    clear_postgres_kyc?: boolean;
     max_transactions?: number;
     refit_every?: number;
   }) =>
@@ -256,6 +331,7 @@ export const demoApi = {
         years: 10,
         seed: 42,
         clear_existing: true,
+        clear_postgres_kyc: true,
         max_transactions: 100_000,
         refit_every: 500,
         ...body,

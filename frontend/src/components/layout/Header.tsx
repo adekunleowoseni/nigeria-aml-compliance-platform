@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store/uiStore';
 import { useAuthStore } from '../../store/authStore';
 
 export default function Header() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { sidebarOpen, setSidebarOpen } = useStore();
   const { user, logout } = useAuthStore();
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -49,7 +50,17 @@ export default function Header() {
       >
         <span className="text-xl">≡</span>
       </button>
-      <div className="flex-1" />
+      <nav className="hidden sm:flex items-center gap-1 text-sm text-slate-600 flex-1 min-w-0 ml-1" aria-label="Quick links">
+        <Link
+          to="/compliance"
+          className={`px-2 py-1.5 rounded-md whitespace-nowrap ${
+            location.pathname === '/compliance' ? 'bg-slate-100 text-slate-900 font-medium' : 'hover:bg-slate-50'
+          }`}
+        >
+          Compliance
+        </Link>
+      </nav>
+      <div className="flex-1 sm:hidden" />
 
       <div className="relative" ref={dropdownRef}>
         <button

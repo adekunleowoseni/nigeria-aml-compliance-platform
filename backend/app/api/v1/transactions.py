@@ -12,6 +12,7 @@ from app.models.alert import AlertResponse
 from app.models.transaction import GraphResponse, TransactionCreate, TransactionResponse
 from app.services.anomaly_engine import assess_transaction, compute_anomaly_score_bulk
 from app.services.temporal_simulation import generate_temporal_dataset
+from app.services.typology_rules import evaluate_typologies
 
 router = APIRouter(prefix="/transactions")
 
@@ -43,24 +44,52 @@ async def _process_transaction_async(txn_id: str, *, skip_llm: bool = False) -> 
         customer_profile={"role": "unknown", "customer_id": txn.customer_id},
         skip_llm=skip_llm,
     )
+    md0 = txn.metadata or {}
+    profile_label = (
+        str(md0.get("profile") or md0.get("pattern") or "") if isinstance(md0, dict) else ""
+    )
+    typ_hits = evaluate_typologies(txn.model_dump(), baseline, customer_profile_label=profile_label)
+    typ_rule_ids = [h.rule_id for h in typ_hits]
+
     txn.risk_score = float(assessment.anomaly_score)
-    if assessment.triggered:
+    triggered = assessment.triggered or bool(typ_hits)
+    if triggered:
         md = dict(txn.metadata or {})
         if assessment.llm_summary:
             md["decision_support_summary"] = assessment.llm_summary
-            md["trigger_reason"] = assessment.reason
+        md["trigger_reason"] = assessment.reason
+        if typ_hits:
+            md["typology_hits"] = [h.rule_id for h in typ_hits]
+            md["typology_titles"] = [h.title for h in typ_hits[:8]]
         txn.metadata = md
-        # Create an alert so it appears in alerts list and dashboard
-        scenario = (txn.metadata or {}).get("simulation_scenario") if txn.metadata else None
-        summary = assessment.llm_summary or (f"[{scenario}] " if scenario else "") + (
-            txn.narrative or "Anomaly detected vs customer baseline"
+        scenario = md.get("simulation_scenario")
+        rule_ids: List[str] = []
+        if assessment.triggered:
+            rule_ids.append("RULE-ANOMALY")
+        rule_ids.extend(typ_rule_ids)
+        if scenario:
+            rule_ids.append(f"SIM-{scenario}")
+        seen: set[str] = set()
+        rule_ids = [x for x in rule_ids if not (x in seen or seen.add(x))]
+
+        summary_parts: List[str] = []
+        if typ_hits:
+            summary_parts.append(f"{typ_hits[0].title}: {typ_hits[0].narrative[:220]}")
+        if assessment.llm_summary:
+            summary_parts.append(assessment.llm_summary[:220])
+        if not summary_parts:
+            summary_parts.append((f"[{scenario}] " if scenario else "") + (txn.narrative or "AML review required"))
+        summary = " | ".join(summary_parts)
+        severity = max(
+            float(assessment.anomaly_score),
+            min(0.95, 0.35 + 0.07 * len(typ_hits)),
         )
         alert = AlertResponse(
             transaction_id=txn.id,
             customer_id=txn.customer_id,
-            severity=assessment.anomaly_score,
+            severity=severity,
             status="open",
-            rule_ids=["RULE-ANOMALY"] + ([f"SIM-{scenario}"] if scenario else []),
+            rule_ids=rule_ids,
             summary=summary[:500],
         )
         _ALERTS[alert.id] = alert
@@ -82,6 +111,8 @@ async def ingest_transaction(
         currency=body.currency,
         transaction_type=body.transaction_type,
         narrative=body.narrative,
+        counterparty_id=body.counterparty_id,
+        counterparty_name=body.counterparty_name,
         metadata=body.metadata,
         status="received",
         created_at=datetime.utcnow(),
@@ -108,6 +139,10 @@ async def bulk_ingest(
                 amount=item.amount,
                 currency=item.currency,
                 transaction_type=item.transaction_type,
+                narrative=item.narrative,
+                counterparty_id=item.counterparty_id,
+                counterparty_name=item.counterparty_name,
+                metadata=item.metadata,
                 status="received",
                 created_at=datetime.utcnow(),
             )
@@ -198,6 +233,12 @@ async def run_temporal_simulation(
     if clear_existing:
         _TXNS.clear()
         _ALERTS.clear()
+        from app.api.v1.reports import _REPORTS
+
+        _REPORTS.clear()
+        from app.services.customer_kyc_db import clear_memory_kyc
+
+        clear_memory_kyc()
 
     txns, summary = generate_temporal_dataset(years=years, seed=seed, max_transactions=max_transactions)
 
@@ -221,22 +262,47 @@ async def run_temporal_simulation(
             st,
             refit_every=refit_every,
         )
+        profile_label = ""
+        if isinstance(txn_dict.get("metadata"), dict):
+            profile_label = str(
+                txn_dict["metadata"].get("profile") or txn_dict["metadata"].get("pattern") or ""
+            )
+        typ_hits = evaluate_typologies(txn_dict, baseline, customer_profile_label=profile_label)
+        typ_rule_ids = [h.rule_id for h in typ_hits]
+        triggered = assessment.triggered or bool(typ_hits)
 
         txn.risk_score = float(assessment.anomaly_score)
-        if assessment.triggered:
+        if triggered:
             md = dict(txn.metadata or {})
             md["trigger_reason"] = assessment.reason
+            if typ_hits:
+                md["typology_hits"] = typ_rule_ids
             txn.metadata = md
             scenario = md.get("simulation_scenario")
-            summary_text = (f"[{scenario}] " if scenario else "") + (
-                txn.narrative or "Anomaly detected vs customer baseline"
+            rule_ids: List[str] = []
+            if assessment.triggered:
+                rule_ids.append("RULE-ANOMALY")
+            rule_ids.extend(typ_rule_ids)
+            if scenario:
+                rule_ids.append(f"SIM-{scenario}")
+            seen2: set[str] = set()
+            rule_ids = [x for x in rule_ids if not (x in seen2 or seen2.add(x))]
+            if typ_hits:
+                summary_text = f"{typ_hits[0].title}: {typ_hits[0].narrative[:200]}"
+            else:
+                summary_text = (f"[{scenario}] " if scenario else "") + (
+                    txn.narrative or "Anomaly detected vs customer baseline"
+                )
+            severity = max(
+                float(assessment.anomaly_score),
+                min(0.95, 0.35 + 0.07 * len(typ_hits)),
             )
             alert = AlertResponse(
                 transaction_id=txn.id,
                 customer_id=txn.customer_id,
-                severity=assessment.anomaly_score,
+                severity=severity,
                 status="open",
-                rule_ids=["RULE-ANOMALY"] + ([f"SIM-{scenario}"] if scenario else []),
+                rule_ids=rule_ids,
                 summary=summary_text[:500],
             )
             _ALERTS[alert.id] = alert

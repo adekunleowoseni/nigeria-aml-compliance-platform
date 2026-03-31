@@ -4,6 +4,7 @@ const nav = [
   { to: '/', label: 'Dashboard' },
   { to: '/transactions', label: 'Transactions' },
   { to: '/alerts', label: 'Alerts' },
+  { to: '/compliance', label: 'Compliance' },
   { to: '/reports', label: 'Reports' },
   { to: '/analytics', label: 'Analytics' },
   { to: '/settings', label: 'Settings' },
@@ -12,11 +13,11 @@ const nav = [
 export default function Sidebar() {
   const location = useLocation();
   return (
-    <aside className="w-56 bg-slate-800 text-white flex flex-col">
-      <div className="p-4 border-b border-slate-700">
+    <aside className="w-56 min-h-0 h-screen sticky top-0 bg-slate-800 text-white flex flex-col shrink-0">
+      <div className="p-4 border-b border-slate-700 shrink-0">
         <h2 className="font-semibold text-lg">Nigeria AML</h2>
       </div>
-      <nav className="flex-1 p-2">
+      <nav className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-2" aria-label="Main navigation">
         {nav.map(({ to, label }) => (
           <Link
             key={to}

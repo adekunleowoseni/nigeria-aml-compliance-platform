@@ -350,12 +350,89 @@ def _build_str_text(
     }
 
 
+def _append_str_enrichment(doc: Document, enrichment: Dict[str, Any]) -> None:
+    """NFIU-oriented addenda: counterparty trail, typologies, screening, utilisation."""
+    doc.add_paragraph("")
+    p = doc.add_paragraph()
+    r = p.add_run("ADDITIONAL ANALYTICAL CONTEXT")
+    r.bold = True
+
+    bvn_accts = enrichment.get("bvn_linked_accounts") or []
+    if bvn_accts:
+        doc.add_paragraph("Accounts linked to the customer BVN / ID on file:")
+        for row in bvn_accts[:12]:
+            if isinstance(row, dict):
+                doc.add_paragraph(
+                    f"  — Account {row.get('account_number')} ({row.get('customer_name')}); customer ref {row.get('customer_id')}"
+                )
+
+    rw = enrichment.get("rolling_windows") or {}
+    if rw:
+        lm = rw.get("lifetime_for_narrative") or {}
+        ytd = rw.get("twelve_month_ytd") or {}
+        h24 = rw.get("last_24_hours") or {}
+        doc.add_paragraph(
+            f"Relationship analytics: lifetime volume approx. ₦{float(lm.get('total_inflow') or 0):,.0f} inflow / "
+            f"₦{float(lm.get('total_outflow') or 0):,.0f} outflow over {lm.get('transaction_count') or 0} transactions; "
+            f"last 12 months ₦{float(ytd.get('inflow_total') or 0):,.0f} in / ₦{float(ytd.get('outflow_total') or 0):,.0f} out; "
+            f"last 24 hours {h24.get('transaction_count') or 0} transactions."
+        )
+
+    ff = enrichment.get("flagged_flows") or {}
+    ins = ff.get("top_inbound_sources") or []
+    outs = ff.get("top_outbound_destinations") or []
+    if ins:
+        doc.add_paragraph("Notable inbound sources (counterparty / amount):")
+        for row in ins[:6]:
+            if isinstance(row, dict):
+                name = row.get("counterparty_name") or row.get("counterparty_id")
+                bank = row.get("bank_or_institution") or "—"
+                doc.add_paragraph(
+                    f"  — From {name} via {bank}: ₦{float(row.get('total_amount') or 0):,.0f} ({row.get('txn_count')} txns)"
+                )
+    if outs:
+        doc.add_paragraph("Notable outbound destinations:")
+        for row in outs[:6]:
+            if isinstance(row, dict):
+                name = row.get("counterparty_name") or row.get("counterparty_id")
+                bank = row.get("bank_or_institution") or "—"
+                doc.add_paragraph(
+                    f"  — To {name} via {bank}: ₦{float(row.get('total_amount') or 0):,.0f} ({row.get('txn_count')} txns)"
+                )
+
+    why = enrichment.get("why_suspicious") or {}
+    addon = why.get("nfiu_narrative_addon")
+    if addon:
+        doc.add_paragraph("Typology-aligned narrative (automated assist):")
+        doc.add_paragraph(str(addon)[:3500])
+
+    doc.add_paragraph(f"Adverse media / screening note: {enrichment.get('adverse_media') or 'See sanctions block below.'}")
+
+    san = enrichment.get("sanctions_screening") or {}
+    mc = int(san.get("match_count") or 0)
+    if mc > 0:
+        doc.add_paragraph(
+            f"Sanctions / watchlist screening (online): {mc} potential match(es) returned; manual adjudication required."
+        )
+        for m in (san.get("matches") or [])[:5]:
+            if isinstance(m, dict):
+                doc.add_paragraph(f"  — {m.get('caption') or m.get('id')}")
+    else:
+        note = san.get("note") or "No online list matches returned for automated query (not a clearance)."
+        doc.add_paragraph(f"Sanctions screening: {note}")
+
+    fu = enrichment.get("funds_utilization") or {}
+    if fu.get("description"):
+        doc.add_paragraph(f"Funds utilisation (post-event review): {fu['description']}")
+
+
 def render_str_docx_bytes(
     *,
     customer: CustomerKyc,
     txn: Dict[str, Any],
     alert: Dict[str, Any],
     approver_name: str,
+    enrichment: Optional[Dict[str, Any]] = None,
 ) -> bytes:
     """
     Render an STR in the same overall format as the user's provided NFIU goAML template.
@@ -407,11 +484,16 @@ def render_str_docx_bytes(
     is_outflow = text["transaction_description"].lower().startswith("large outflow")
     transfer_verb = "out of" if is_outflow else "into"
     headline = "Large Outflow" if is_outflow else "Large Inflow"
+    util_line = (
+        "The fund has not been utilised in the customer's account as of the period of filing this report."
+    )
+    if enrichment and (enrichment.get("funds_utilization") or {}).get("description"):
+        util_line = str(enrichment["funds_utilization"]["description"])
     doc.add_paragraph(
         f"Further review of the account revealed that on {text['txn_date_long']}, "
         f"{headline} of {text['txn_amount_words']} Only ({amount_currency}) was transferred "
         f"{transfer_verb} the account of {customer.customer_name} with account number {customer.account_number}. "
-        "The fund has not been utilised in the customer's account as of the period of filing this report."
+        f"{util_line}"
     )
 
     # Totals / processing statement (template style)
@@ -429,6 +511,9 @@ def render_str_docx_bytes(
     doc.add_paragraph("2. Deviation from Customer's Transaction Behaviour")
     doc.add_paragraph("3. Lack of Clear Economic Purpose")
     doc.add_paragraph("4. Relationship with the Sender Cannot be Substantiated")
+
+    if enrichment:
+        _append_str_enrichment(doc, enrichment)
 
     doc.add_paragraph(
         "ACTION TAKEN: The Bank conducted an enhanced due diligence review on the customer and the transaction. "

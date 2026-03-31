@@ -16,6 +16,13 @@ export default function Alerts() {
   const [resolveNotes, setResolveNotes] = useState('');
   const [escalateReason, setEscalateReason] = useState('');
   const [escalatedTo, setEscalatedTo] = useState('');
+  const [eddEmail, setEddEmail] = useState('');
+  const [eddName, setEddName] = useState('');
+  const [sendEddWithAction, setSendEddWithAction] = useState(false);
+  const [notifyCcoWithAction, setNotifyCcoWithAction] = useState(false);
+  const [followUpNote, setFollowUpNote] = useState('');
+  const [ccoExtraRecipient, setCcoExtraRecipient] = useState('');
+  const [workflowBusy, setWorkflowBusy] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const setLastAction = useReportActionStore((s) => s.setLastAction);
 
@@ -42,6 +49,29 @@ export default function Alerts() {
     enabled: !!selectedId,
   });
 
+  const { data: snapshot, isLoading: snapshotLoading } = useQuery({
+    queryKey: ['alert', 'snapshot', selectedId],
+    queryFn: () => alertsApi.getSnapshot(selectedId!),
+    enabled: !!selectedId,
+  });
+
+  useEffect(() => {
+    if (!selectedId || !snapshot) return;
+    const prof = snapshot.customer_profile as Record<string, unknown> | undefined;
+    if (!prof) return;
+    const name = String(prof.customer_name ?? '').trim();
+    const email = String(prof.email ?? '').trim();
+    setEddName(name);
+    setEddEmail(email);
+  }, [selectedId, snapshot]);
+
+  useEffect(() => {
+    setSendEddWithAction(false);
+    setNotifyCcoWithAction(false);
+    setFollowUpNote('');
+    setCcoExtraRecipient('');
+  }, [selectedId]);
+
   const investigateMutation = useMutation({
     mutationFn: ({ alertId, body }: { alertId: string; body: { investigator_id: string; notes?: string } }) =>
       alertsApi.investigate(alertId, body),
@@ -49,21 +79,7 @@ export default function Alerts() {
       queryClient.setQueryData<{ items: Alert[]; total: number; skip: number; limit: number }>(['alerts', 0, 20], (old) =>
         old ? { ...old, items: old.items.map((a) => (a.id === alertId ? { ...a, status: 'investigating' } : a)) } : old
       );
-      setMessage({ type: 'success', text: 'Investigation started.' });
-      setActionTab(null);
-      setInvestigatorId('');
-      setInvestigateNotes('');
-      const a = (list?.items ?? []).find((x) => x.id === alertId);
-      setLastAction({
-        action_key: 'INVESTIGATE',
-        alert_id: alertId,
-        transaction_id: a?.transaction_id,
-        customer_id: a?.customer_id,
-        summary: a?.summary,
-        at: new Date().toISOString(),
-      });
     },
-    onError: (e: Error) => setMessage({ type: 'error', text: e.message }),
   });
 
   const resolveMutation = useMutation({
@@ -78,21 +94,7 @@ export default function Alerts() {
       queryClient.setQueryData<{ items: Alert[]; total: number; skip: number; limit: number }>(['alerts', 0, 20], (old) =>
         old ? { ...old, items: old.items.map((a) => (a.id === alertId ? { ...a, status: 'closed' } : a)) } : old
       );
-      setMessage({ type: 'success', text: 'Alert resolved and closed.' });
-      setActionTab(null);
-      setResolveNotes('');
-      setSelectedId(null);
-      const a = (list?.items ?? []).find((x) => x.id === alertId);
-      setLastAction({
-        action_key: `RESOLVE_${resolution === 'true_positive' ? 'TRUE_POSITIVE' : 'FALSE_POSITIVE'}`,
-        alert_id: alertId,
-        transaction_id: a?.transaction_id,
-        customer_id: a?.customer_id,
-        summary: a?.summary,
-        at: new Date().toISOString(),
-      });
     },
-    onError: (e: Error) => setMessage({ type: 'error', text: e.message }),
   });
 
   const escalateMutation = useMutation({
@@ -102,7 +104,206 @@ export default function Alerts() {
       queryClient.setQueryData<{ items: Alert[]; total: number; skip: number; limit: number }>(['alerts', 0, 20], (old) =>
         old ? { ...old, items: old.items.map((a) => (a.id === alertId ? { ...a, status: 'escalated' } : a)) } : old
       );
-      setMessage({ type: 'success', text: 'Alert escalated.' });
+    },
+  });
+
+  const items = list?.items ?? [];
+  const alert = selectedId ? (items.find((a) => a.id === selectedId) ?? alertDetail) : null;
+  const actionKey = useMemo(() => {
+    if (!actionTab) return null;
+    if (actionTab === 'investigate') return 'INVESTIGATE';
+    if (actionTab === 'escalate') return 'ESCALATE';
+    return `RESOLVE_${resolution === 'true_positive' ? 'TRUE_POSITIVE' : 'FALSE_POSITIVE'}`;
+  }, [actionTab, resolution]);
+
+  const handleInvestigate = async () => {
+    if (!selectedId || !investigatorId.trim()) return;
+    if (sendEddWithAction && !eddEmail.trim()) {
+      setMessage({
+        type: 'error',
+        text: 'Enter the customer’s email to send the EDD request, or untick that option.',
+      });
+      return;
+    }
+    const alertId = selectedId;
+    const inv = investigatorId.trim();
+    const notes = investigateNotes.trim() || undefined;
+    const noteExtra = followUpNote.trim() || undefined;
+    const extraRec = ccoExtraRecipient.trim() ? [ccoExtraRecipient.trim()] : undefined;
+    setWorkflowBusy(true);
+    setMessage(null);
+    try {
+      await investigateMutation.mutateAsync({ alertId, body: { investigator_id: inv, notes } });
+      const parts: string[] = ['Investigation started.'];
+      if (notifyCcoWithAction) {
+        try {
+          await alertsApi.notifyCco(alertId, {
+            action: 'investigate',
+            investigator_id: inv,
+            investigation_notes: notes,
+            additional_note: noteExtra,
+            extra_recipients: extraRec,
+          });
+          parts.push('CCO notified.');
+        } catch (e) {
+          parts.push(`CCO email failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        }
+      }
+      if (sendEddWithAction) {
+        try {
+          await alertsApi.notifyEdd(alertId, {
+            customer_email: eddEmail.trim(),
+            customer_name: eddName.trim() || undefined,
+            compliance_action: 'investigate',
+            investigator_id: inv,
+            investigation_notes: notes,
+            additional_note: noteExtra,
+          });
+          parts.push('EDD request sent to customer.');
+        } catch (e) {
+          parts.push(`EDD email failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        }
+      }
+      const failed = parts.some((p) => p.includes('failed'));
+      setMessage({ type: failed ? 'error' : 'success', text: parts.join(' ') });
+      setActionTab(null);
+      setInvestigatorId('');
+      setInvestigateNotes('');
+      const a = (list?.items ?? []).find((x) => x.id === alertId);
+      setLastAction({
+        action_key: 'INVESTIGATE',
+        alert_id: alertId,
+        transaction_id: a?.transaction_id,
+        customer_id: a?.customer_id,
+        summary: a?.summary,
+        at: new Date().toISOString(),
+      });
+    } catch (e) {
+      setMessage({ type: 'error', text: e instanceof Error ? e.message : 'Could not start investigation.' });
+    } finally {
+      setWorkflowBusy(false);
+    }
+  };
+
+  const handleResolve = async () => {
+    if (!selectedId || !resolveNotes.trim()) return;
+    if (sendEddWithAction && !eddEmail.trim()) {
+      setMessage({
+        type: 'error',
+        text: 'Enter the customer’s email to send the EDD request, or untick that option.',
+      });
+      return;
+    }
+    const alertId = selectedId;
+    const res = resolution;
+    const notes = resolveNotes.trim();
+    const noteExtra = followUpNote.trim() || undefined;
+    const extraRec = ccoExtraRecipient.trim() ? [ccoExtraRecipient.trim()] : undefined;
+    setWorkflowBusy(true);
+    setMessage(null);
+    try {
+      await resolveMutation.mutateAsync({ alertId, body: { resolution: res, notes } });
+      const parts: string[] = ['Alert resolved and closed.'];
+      if (notifyCcoWithAction) {
+        try {
+          await alertsApi.notifyCco(alertId, {
+            action: 'resolve',
+            resolution: res,
+            resolution_notes: notes,
+            additional_note: noteExtra,
+            extra_recipients: extraRec,
+          });
+          parts.push('CCO notified.');
+        } catch (e) {
+          parts.push(`CCO email failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        }
+      }
+      if (sendEddWithAction) {
+        try {
+          await alertsApi.notifyEdd(alertId, {
+            customer_email: eddEmail.trim(),
+            customer_name: eddName.trim() || undefined,
+            compliance_action: 'resolve',
+            resolution: res,
+            resolution_notes: notes,
+            additional_note: noteExtra,
+          });
+          parts.push('EDD request sent to customer.');
+        } catch (e) {
+          parts.push(`EDD email failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        }
+      }
+      const failed = parts.some((p) => p.includes('failed'));
+      setMessage({ type: failed ? 'error' : 'success', text: parts.join(' ') });
+      setActionTab(null);
+      setResolveNotes('');
+      setSelectedId(null);
+      const a = (list?.items ?? []).find((x) => x.id === alertId);
+      setLastAction({
+        action_key: `RESOLVE_${res === 'true_positive' ? 'TRUE_POSITIVE' : 'FALSE_POSITIVE'}`,
+        alert_id: alertId,
+        transaction_id: a?.transaction_id,
+        customer_id: a?.customer_id,
+        summary: a?.summary,
+        at: new Date().toISOString(),
+      });
+    } catch (e) {
+      setMessage({ type: 'error', text: e instanceof Error ? e.message : 'Could not resolve alert.' });
+    } finally {
+      setWorkflowBusy(false);
+    }
+  };
+
+  const handleEscalate = async () => {
+    if (!selectedId || !escalateReason.trim() || !escalatedTo.trim()) return;
+    if (sendEddWithAction && !eddEmail.trim()) {
+      setMessage({
+        type: 'error',
+        text: 'Enter the customer’s email to send the EDD request, or untick that option.',
+      });
+      return;
+    }
+    const alertId = selectedId;
+    const reason = escalateReason.trim();
+    const to = escalatedTo.trim();
+    const noteExtra = followUpNote.trim() || undefined;
+    const extraRec = ccoExtraRecipient.trim() ? [ccoExtraRecipient.trim()] : undefined;
+    setWorkflowBusy(true);
+    setMessage(null);
+    try {
+      await escalateMutation.mutateAsync({ alertId, body: { reason, escalated_to: to } });
+      const parts: string[] = ['Alert escalated.'];
+      if (notifyCcoWithAction) {
+        try {
+          await alertsApi.notifyCco(alertId, {
+            action: 'escalate',
+            escalate_reason: reason,
+            escalated_to: to,
+            additional_note: noteExtra,
+            extra_recipients: extraRec,
+          });
+          parts.push('CCO notified.');
+        } catch (e) {
+          parts.push(`CCO email failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        }
+      }
+      if (sendEddWithAction) {
+        try {
+          await alertsApi.notifyEdd(alertId, {
+            customer_email: eddEmail.trim(),
+            customer_name: eddName.trim() || undefined,
+            compliance_action: 'escalate',
+            escalate_reason: reason,
+            escalated_to: to,
+            additional_note: noteExtra,
+          });
+          parts.push('EDD request sent to customer.');
+        } catch (e) {
+          parts.push(`EDD email failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        }
+      }
+      const failed = parts.some((p) => p.includes('failed'));
+      setMessage({ type: failed ? 'error' : 'success', text: parts.join(' ') });
       setActionTab(null);
       setEscalateReason('');
       setEscalatedTo('');
@@ -116,41 +317,11 @@ export default function Alerts() {
         summary: a?.summary,
         at: new Date().toISOString(),
       });
-    },
-    onError: (e: Error) => setMessage({ type: 'error', text: e.message }),
-  });
-
-  const items = list?.items ?? [];
-  const alert = selectedId ? (items.find((a) => a.id === selectedId) ?? alertDetail) : null;
-  const actionKey = useMemo(() => {
-    if (!actionTab) return null;
-    if (actionTab === 'investigate') return 'INVESTIGATE';
-    if (actionTab === 'escalate') return 'ESCALATE';
-    return `RESOLVE_${resolution === 'true_positive' ? 'TRUE_POSITIVE' : 'FALSE_POSITIVE'}`;
-  }, [actionTab, resolution]);
-
-  const handleInvestigate = () => {
-    if (!selectedId || !investigatorId.trim()) return;
-    investigateMutation.mutate({
-      alertId: selectedId,
-      body: { investigator_id: investigatorId.trim(), notes: investigateNotes.trim() || undefined },
-    });
-  };
-
-  const handleResolve = () => {
-    if (!selectedId || !resolveNotes.trim()) return;
-    resolveMutation.mutate({
-      alertId: selectedId,
-      body: { resolution, notes: resolveNotes.trim() },
-    });
-  };
-
-  const handleEscalate = () => {
-    if (!selectedId || !escalateReason.trim() || !escalatedTo.trim()) return;
-    escalateMutation.mutate({
-      alertId: selectedId,
-      body: { reason: escalateReason.trim(), escalated_to: escalatedTo.trim() },
-    });
+    } catch (e) {
+      setMessage({ type: 'error', text: e instanceof Error ? e.message : 'Could not escalate alert.' });
+    } finally {
+      setWorkflowBusy(false);
+    }
   };
 
   return (
@@ -165,7 +336,7 @@ export default function Alerts() {
             id="alert-search"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="e.g. demo-txn-wire-001 or CUST-NG-2002"
+            placeholder="e.g. DEMO-PERSON-ADESANYA or DEMO-WORKER-LAGOS"
             className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm bg-white"
           />
           <p className="text-xs text-slate-500 mt-1">Results come from the current store; later this will query Postgres.</p>
@@ -256,7 +427,7 @@ export default function Alerts() {
           aria-labelledby="alert-detail-title"
         >
           <div
-            className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+            className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[90vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="p-6 border-b border-slate-200 flex justify-between items-start">
@@ -306,8 +477,13 @@ export default function Alerts() {
                     )}
                   </dl>
 
-                  <div className="pt-4 border-t border-slate-100">
-                    <p className="text-sm font-medium text-slate-700 mb-2">Actions</p>
+                  <div className="pt-4 border-t border-slate-200">
+                    <h3 className="text-sm font-semibold text-slate-900 mb-2">Compliance actions (pre-resolution)</h3>
+                    <p className="text-xs text-slate-600 mb-3">
+                      Select Investigate, Resolve, or Escalate, confirm customer contact and notification options, then complete
+                      the form. On submit, the platform saves the disposition first; ticked notifications are sent immediately
+                      afterward with the same structured details to the CCO and/or the customer.
+                    </p>
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
@@ -339,6 +515,74 @@ export default function Alerts() {
                       </div>
                     )}
 
+                    {actionTab && (
+                      <div className="mt-4 p-3 rounded-lg border border-slate-200 bg-white space-y-3">
+                        <p className="text-xs font-semibold text-slate-800">Email notifications (with this submission)</p>
+                        <p className="text-xs text-slate-500">
+                          Customer contact is pre-filled when the snapshot loads (KYC / metadata). Confirm or replace before
+                          sending live mail.
+                        </p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <label className="block text-sm font-medium text-slate-700">
+                            Customer email
+                            <input
+                              type="email"
+                              value={eddEmail}
+                              onChange={(e) => setEddEmail(e.target.value)}
+                              className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                              autoComplete="off"
+                            />
+                          </label>
+                          <label className="block text-sm font-medium text-slate-700">
+                            Customer name
+                            <input
+                              type="text"
+                              value={eddName}
+                              onChange={(e) => setEddName(e.target.value)}
+                              className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                            />
+                          </label>
+                        </div>
+                        <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={sendEddWithAction}
+                            onChange={(e) => setSendEddWithAction(e.target.checked)}
+                            className="mt-0.5 rounded border-slate-300"
+                          />
+                          <span>Send enhanced due diligence (EDD) request to the customer</span>
+                        </label>
+                        <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={notifyCcoWithAction}
+                            onChange={(e) => setNotifyCcoWithAction(e.target.checked)}
+                            className="mt-0.5 rounded border-slate-300"
+                          />
+                          <span>Notify Chief Compliance Officer (CCO) by email</span>
+                        </label>
+                        <label className="block text-sm font-medium text-slate-700">
+                          Additional note for correspondence (optional)
+                          <textarea
+                            value={followUpNote}
+                            onChange={(e) => setFollowUpNote(e.target.value)}
+                            rows={2}
+                            className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                          />
+                        </label>
+                        <label className="block text-sm font-medium text-slate-700">
+                          Extra CCO recipient email (optional)
+                          <input
+                            type="email"
+                            value={ccoExtraRecipient}
+                            onChange={(e) => setCcoExtraRecipient(e.target.value)}
+                            placeholder="CC another mailbox on the CCO notification"
+                            className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 text-sm"
+                          />
+                        </label>
+                      </div>
+                    )}
+
                     {actionTab === 'investigate' && (
                       <div className="mt-4 p-4 bg-slate-50 rounded-lg space-y-3">
                         <label className="block text-sm font-medium text-slate-700">
@@ -364,10 +608,14 @@ export default function Alerts() {
                         <button
                           type="button"
                           onClick={handleInvestigate}
-                          disabled={!investigatorId.trim() || investigateMutation.isPending}
+                          disabled={
+                            workflowBusy ||
+                            !investigatorId.trim() ||
+                            investigateMutation.isPending
+                          }
                           className="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
                         >
-                          {investigateMutation.isPending ? 'Starting…' : 'Start investigation'}
+                          {workflowBusy || investigateMutation.isPending ? 'Working…' : 'Start investigation'}
                         </button>
                       </div>
                     )}
@@ -398,10 +646,10 @@ export default function Alerts() {
                         <button
                           type="button"
                           onClick={handleResolve}
-                          disabled={!resolveNotes.trim() || resolveMutation.isPending}
+                          disabled={workflowBusy || !resolveNotes.trim() || resolveMutation.isPending}
                           className="px-3 py-1.5 text-sm bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50"
                         >
-                          {resolveMutation.isPending ? 'Resolving…' : 'Resolve & close'}
+                          {workflowBusy || resolveMutation.isPending ? 'Working…' : 'Resolve & close'}
                         </button>
                       </div>
                     )}
@@ -431,11 +679,144 @@ export default function Alerts() {
                         <button
                           type="button"
                           onClick={handleEscalate}
-                          disabled={!escalateReason.trim() || !escalatedTo.trim() || escalateMutation.isPending}
+                          disabled={
+                            workflowBusy ||
+                            !escalateReason.trim() ||
+                            !escalatedTo.trim() ||
+                            escalateMutation.isPending
+                          }
                           className="px-3 py-1.5 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
                         >
-                          {escalateMutation.isPending ? 'Escalating…' : 'Escalate'}
+                          {workflowBusy || escalateMutation.isPending ? 'Working…' : 'Escalate'}
                         </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="pt-4 border-t border-slate-200">
+                    <h3 className="text-sm font-semibold text-slate-900 mb-2">Transaction snapshot (pre-resolution)</h3>
+                    {snapshotLoading && <p className="text-sm text-slate-500">Loading snapshot…</p>}
+                    {!snapshotLoading && snapshot && (
+                      <div className="space-y-3 text-sm text-slate-700 bg-slate-50 rounded-lg p-4 border border-slate-100">
+                        {(() => {
+                          const tx = snapshot.transaction as Record<string, unknown> | undefined;
+                          const prof = snapshot.customer_profile as Record<string, unknown> | undefined;
+                          const bvn = (snapshot.bvn_linked_accounts as unknown[]) ?? [];
+                          const why = snapshot.why_suspicious as Record<string, unknown> | undefined;
+                          const typ = (why?.typologies as Array<Record<string, string>>) ?? [];
+                          const rw = snapshot.rolling_windows as Record<string, unknown> | undefined;
+                          const h24 = rw?.last_24_hours as Record<string, unknown> | undefined;
+                          const y12 = rw?.twelve_month_ytd as Record<string, unknown> | undefined;
+                          const life = rw?.lifetime_for_narrative as Record<string, unknown> | undefined;
+                          const ff = snapshot.flagged_flows as Record<string, unknown> | undefined;
+                          const san = snapshot.sanctions_screening as Record<string, unknown> | undefined;
+                          return (
+                            <>
+                              {tx && (
+                                <div>
+                                  <p className="font-medium text-slate-800">Flagged transaction</p>
+                                  <p>
+                                    Amount:{' '}
+                                    <span className="font-mono">
+                                      {String(tx.currency ?? 'NGN')} {Number(tx.amount ?? 0).toLocaleString('en-NG')}
+                                    </span>
+                                    {' · '}
+                                    <span className="text-amber-800 font-medium">{String(tx.debit_credit ?? '')}</span>
+                                  </p>
+                                  <p className="text-xs text-slate-600 mt-1">
+                                    Account: <span className="font-mono">{String(prof?.account_number ?? '—')}</span>
+                                    {' · '}
+                                    Counterparty: {String(tx.counterparty_name || tx.counterparty_id || '—')}
+                                  </p>
+                                  {tx.narrative ? (
+                                    <p className="mt-1 text-slate-600">Narration: {String(tx.narrative)}</p>
+                                  ) : null}
+                                </div>
+                              )}
+                              {prof && (
+                                <div>
+                                  <p className="font-medium text-slate-800">Customer profile</p>
+                                  <p>
+                                    {String(prof.customer_name ?? '')} · {String(prof.line_of_business ?? '')}
+                                  </p>
+                                  <p className="text-xs text-slate-600">
+                                    BVN/ID: {String(prof.bvn ?? prof.id_number ?? '')}
+                                    {prof.email ? (
+                                      <>
+                                        {' · '}
+                                        On-file email: <span className="font-mono">{String(prof.email)}</span>
+                                      </>
+                                    ) : null}
+                                  </p>
+                                </div>
+                              )}
+                              {bvn.length > 0 && (
+                                <div>
+                                  <p className="font-medium text-slate-800">Accounts linked to same BVN</p>
+                                  <ul className="list-disc list-inside text-xs text-slate-600">
+                                    {bvn.slice(0, 8).map((row, i) => (
+                                      <li key={i}>
+                                        {String((row as Record<string, unknown>).account_number)} (
+                                        {(row as Record<string, unknown>).customer_id as string})
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {typ.length > 0 && (
+                                <div>
+                                  <p className="font-medium text-slate-800">Why suspicious (typologies)</p>
+                                  <ul className="space-y-1 text-xs">
+                                    {typ.slice(0, 6).map((t, i) => (
+                                      <li key={i}>
+                                        <span className="font-mono text-slate-700">{t.rule_id}</span>: {t.title} —{' '}
+                                        {t.narrative?.slice(0, 160)}
+                                        {t.narrative && t.narrative.length > 160 ? '…' : ''}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                              {(h24 || y12 || life) && (
+                                <div>
+                                  <p className="font-medium text-slate-800">Windows (24h · 12 months · lifetime)</p>
+                                  <p className="text-xs text-slate-600">
+                                    24h: {String(h24?.transaction_count ?? 0)} txns, in ₦
+                                    {Number(h24?.inflow_total ?? 0).toLocaleString('en-NG')}, out ₦
+                                    {Number(h24?.outflow_total ?? 0).toLocaleString('en-NG')}
+                                  </p>
+                                  <p className="text-xs text-slate-600">
+                                    12m: in ₦{Number(y12?.inflow_total ?? 0).toLocaleString('en-NG')}, out ₦
+                                    {Number(y12?.outflow_total ?? 0).toLocaleString('en-NG')}
+                                  </p>
+                                  <p className="text-xs text-slate-600">
+                                    Lifetime: {String(life?.transaction_count ?? 0)} txns, age{' '}
+                                    {String(life?.account_age_days ?? '—')} days
+                                  </p>
+                                </div>
+                              )}
+                              {ff && (
+                                <div>
+                                  <p className="font-medium text-slate-800">Source / destination (top counterparties)</p>
+                                  <p className="text-xs text-slate-600">
+                                    Inbound sources and outbound destinations summarise banks and senders for this customer.
+                                  </p>
+                                </div>
+                              )}
+                              {snapshot.adverse_media && (
+                                <p className="text-xs text-slate-700 border-l-2 border-amber-300 pl-2">
+                                  {String(snapshot.adverse_media)}
+                                </p>
+                              )}
+                              {san && (
+                                <p className="text-xs text-slate-600">
+                                  Online sanctions query: {String(san.match_count ?? 0)} match(es).{' '}
+                                  {san.note ? String(san.note) : ''}
+                                </p>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>

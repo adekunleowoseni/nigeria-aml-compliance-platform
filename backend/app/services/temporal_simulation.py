@@ -29,43 +29,43 @@ class CustomerSimProfile:
 # Six archetypes spanning retail, student, trader, HNWI, merchant, importer
 DEFAULT_PROFILES: Tuple[CustomerSimProfile, ...] = (
     CustomerSimProfile(
-        "CUST-SIM-WORKER",
-        "salaried_public_sector",
+        "DEMO-WORKER-LAGOS",
+        "civil_servant_ippis_lagos",
         (220_000, 320_000),
         (2_000, 45_000),
         150_000,
     ),
     CustomerSimProfile(
-        "CUST-SIM-STUDENT",
-        "student_low_income",
+        "DEMO-STUDENT-UNILAG",
+        "student_unilag_low_income",
         None,
         (3_000, 35_000),
         80_000,
     ),
     CustomerSimProfile(
-        "CUST-SIM-TRADER",
-        "sme_trader",
+        "DEMO-TRADER-ABA",
+        "sme_fabric_trader_aba",
         (80_000, 180_000),
         (15_000, 400_000),
         500_000,
     ),
     CustomerSimProfile(
-        "CUST-SIM-HNWI",
-        "high_net_worth",
+        "DEMO-HNWI-VI",
+        "business_owner_victoria_island",
         (2_000_000, 5_000_000),
         (100_000, 2_000_000),
         5_000_000,
     ),
     CustomerSimProfile(
-        "CUST-SIM-MERCHANT",
-        "retail_merchant_pos",
+        "DEMO-MERCHANT-OGBA",
+        "retail_phones_ogba",
         None,
         (500, 25_000),
         300_000,
     ),
     CustomerSimProfile(
-        "CUST-SIM-IMPORTER",
-        "import_logistics",
+        "DEMO-IMPORTER-APAPA",
+        "clearing_forwarding_apapa",
         (400_000, 900_000),
         (50_000, 1_200_000),
         800_000,
@@ -145,7 +145,7 @@ def generate_temporal_dataset(
                         when,
                         amt,
                         "salary",
-                        narrative="Simulated monthly salary credit",
+                        narrative="IPPS salary credit — Office of the Accountant-General (October payroll)",
                         metadata={"pattern": "recurring_salary", "profile": p.label},
                     )
                 )
@@ -159,7 +159,7 @@ def generate_temporal_dataset(
                         when,
                         amt,
                         typ,
-                        narrative="Simulated routine transfer",
+                        narrative="NIP transfer in — family support / rent payment",
                         metadata={"pattern": "routine", "profile": p.label},
                     )
                 )
@@ -172,7 +172,7 @@ def generate_temporal_dataset(
                         when,
                         amt,
                         "cash_deposit",
-                        narrative="Simulated small cash deposit",
+                        narrative="Cash lodgment — branch teller Victoria Island",
                         metadata={"pattern": "routine_cash", "profile": p.label},
                     )
                 )
@@ -191,11 +191,11 @@ def generate_temporal_dataset(
             add_scenario(
                 "SMURFING_FAN_IN",
                 _tx(
-                    "CUST-SIM-STUDENT",
+                    "DEMO-STUDENT-UNILAG",
                     t0 + timedelta(minutes=5 * i),
                     280_000 + i * 3_000,
                     "transfer_in",
-                    narrative="Multiple inbound transfers below typical reporting threshold — smurfing pattern",
+                    narrative="UBA inward NIP — ref: family remittance batch (below typical threshold cluster)",
                     metadata={"pattern": "smurfing", "cluster_id": f"smurf-{y}"},
                 ),
             )
@@ -206,33 +206,33 @@ def generate_temporal_dataset(
         add_scenario(
             "LAYERING_PASS_THROUGH",
             _tx(
-                "CUST-SIM-TRADER",
+                "DEMO-TRADER-ABA",
                 t0,
                 12_000_000,
                 "transfer_in",
-                narrative="Large inbound then rapid outflows — layering",
+                narrative="GTBank inward transfer — Chisco Transport Ltd settlement",
                 metadata={"pattern": "layering", "leg": "in"},
             ),
         )
         add_scenario(
             "LAYERING_PASS_THROUGH",
             _tx(
-                "CUST-SIM-TRADER",
+                "DEMO-TRADER-ABA",
                 t0 + timedelta(minutes=25),
                 11_500_000,
                 "transfer_out",
-                narrative="Layering outbound 1",
+                narrative="Outward transfer — Access Bank / Kano beneficiary",
                 metadata={"pattern": "layering", "leg": "out"},
             ),
         )
         add_scenario(
             "LAYERING_PASS_THROUGH",
             _tx(
-                "CUST-SIM-TRADER",
+                "DEMO-TRADER-ABA",
                 t0 + timedelta(minutes=48),
                 400_000,
                 "transfer_out",
-                narrative="Layering outbound 2",
+                narrative="Outward transfer — Opay wallet sweep",
                 metadata={"pattern": "layering", "leg": "out"},
             ),
         )
@@ -243,22 +243,22 @@ def generate_temporal_dataset(
         add_scenario(
             "CASH_PROFILE_MISMATCH",
             _tx(
-                "CUST-SIM-STUDENT",
+                "DEMO-STUDENT-UNILAG",
                 t0,
                 3_200_000,
                 "cash_deposit",
-                narrative="Cash deposit inconsistent with student profile",
+                narrative="Cash deposit ₦3.2M — source declared as uncle gift (UNILAG student account)",
                 metadata={"pattern": "cash_anomaly"},
             ),
         )
         add_scenario(
             "CASH_PROFILE_MISMATCH",
             _tx(
-                "CUST-SIM-STUDENT",
+                "DEMO-STUDENT-UNILAG",
                 t0 + timedelta(hours=2),
                 2_900_000,
                 "cash_deposit",
-                narrative="Second large cash — structuring suspicion",
+                narrative="Second cash lodgment same day — structuring review flag",
                 metadata={"pattern": "cash_anomaly"},
             ),
         )
@@ -270,11 +270,11 @@ def generate_temporal_dataset(
             add_scenario(
                 "STRUCTURING",
                 _tx(
-                    "CUST-SIM-WORKER",
+                    "DEMO-WORKER-LAGOS",
                     t0 + timedelta(hours=i * 2),
                     990_000,
                     "cash_deposit",
-                    narrative="Repeated deposits just below typical reporting line",
+                    narrative="Cash deposit — amount just below internal monitoring threshold (repeat sequence)",
                     metadata={"pattern": "structuring", "sequence": i},
                 ),
             )
@@ -286,11 +286,11 @@ def generate_temporal_dataset(
             add_scenario(
                 "VELOCITY_BURST",
                 _tx(
-                    "CUST-SIM-MERCHANT",
+                    "DEMO-MERCHANT-OGBA",
                     t0 + timedelta(minutes=2 * i),
                     rng.uniform(8_000, 22_000),
                     "pos_settlement",
-                    narrative="Abnormal POS velocity vs 10y baseline",
+                    narrative="POS settlement batch — Palmpay aggregator (velocity spike vs history)",
                     metadata={"pattern": "velocity", "burst_year": y},
                 ),
             )
@@ -301,11 +301,11 @@ def generate_temporal_dataset(
         add_scenario(
             "WIRE_SPIKE",
             _tx(
-                "CUST-SIM-WORKER",
+                "DEMO-WORKER-LAGOS",
                 t0,
                 18_000_000,
                 "wire",
-                narrative="International wire inconsistent with salaried pattern",
+                narrative="SWIFT inflow USD equivalent — sender Dubai commodity broker (inconsistent with IPPIS profile)",
                 metadata={"pattern": "wire_spike"},
             ),
         )
@@ -317,22 +317,22 @@ def generate_temporal_dataset(
         add_scenario(
             "ROUND_TRIP",
             _tx(
-                "CUST-SIM-IMPORTER",
+                "DEMO-IMPORTER-APAPA",
                 t0,
                 amt,
                 "transfer_out",
-                narrative="Outbound leg of possible round-trip",
+                narrative="Outward transfer — Maersk Nigeria Ltd customs duty refund (suspected round-trip leg A)",
                 metadata={"pattern": "round_trip", "leg": "out"},
             ),
         )
         add_scenario(
             "ROUND_TRIP",
             _tx(
-                "CUST-SIM-IMPORTER",
+                "DEMO-IMPORTER-APAPA",
                 t0 + timedelta(days=3),
                 amt * 0.98,
                 "transfer_in",
-                narrative="Inbound leg of possible round-trip",
+                narrative="Inward transfer — same reference family as prior outbound (round-trip leg B)",
                 metadata={"pattern": "round_trip", "leg": "in"},
             ),
         )
@@ -343,11 +343,11 @@ def generate_temporal_dataset(
         add_scenario(
             "CHANNEL_ANOMALY",
             _tx(
-                "CUST-SIM-HNWI",
+                "DEMO-HNWI-VI",
                 t0,
                 25_000_000,
                 "wire",
-                narrative="Single ticket wire disproportionate to recent 10y cadence",
+                narrative="FCMB SWIFT — Lloyds London ref invoice INV-8842 (size vs 10y cadence)",
                 metadata={"pattern": "channel_shift", "counterparty_risk": "high"},
             ),
         )

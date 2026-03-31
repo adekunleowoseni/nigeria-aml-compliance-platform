@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover
     SlowAPIMiddleware = None  # type: ignore
     get_remote_address = None  # type: ignore
 
-from app.api.v1 import ai, alerts, analytics, auth, demo, federated, reports, transactions
+from app.api.v1 import ai, alerts, analytics, auth, compliance, demo, federated, reports, transactions
 from app.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.db.neo4j_client import Neo4jClient
@@ -139,6 +139,7 @@ if limiter:
 
 app.include_router(auth.router, prefix="/api/v1", tags=["auth"])
 app.include_router(transactions.router, prefix="/api/v1", tags=["transactions"])
+app.include_router(compliance.router, prefix="/api/v1", tags=["compliance"])
 app.include_router(alerts.router, prefix="/api/v1", tags=["alerts"])
 app.include_router(reports.router, prefix="/api/v1", tags=["reports"])
 app.include_router(analytics.router, prefix="/api/v1", tags=["analytics"])

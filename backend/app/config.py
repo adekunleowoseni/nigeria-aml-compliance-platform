@@ -54,6 +54,20 @@ class Settings(BaseSettings):
     # Unsupervised anomaly scoring
     anomaly_threshold: float = 0.6
 
+    # SMTP (EDD / CCO notifications). Leave host empty to disable sending.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
+
+    # Chief Compliance Officer mailbox (pre-escalation / STR heads-up)
+    cco_email: str = ""
+
+    # Optional OpenSanctions API key (some deployments require auth)
+    opensanctions_api_key: str = ""
+
 
 settings = Settings()
 
