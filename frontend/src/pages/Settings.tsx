@@ -82,18 +82,51 @@ function SettingsSectionCard({
   );
 }
 
-function SettingsNavLink({ href, children }: { href: string; children: ReactNode }) {
+type SettingsSectionId =
+  | 'account'
+  | 'scope'
+  | 'users'
+  | 'workflow'
+  | 'reference-lists'
+  | 'red-flags'
+  | 'reporting'
+  | 'ai'
+  | 'preferences';
+
+const ADMIN_ONLY_SECTIONS: SettingsSectionId[] = [
+  'users',
+  'workflow',
+  'reference-lists',
+  'red-flags',
+  'reporting',
+  'ai',
+];
+
+function SettingsNavItem({
+  sectionId,
+  activeSection,
+  onSelect,
+  children,
+}: {
+  sectionId: SettingsSectionId;
+  activeSection: SettingsSectionId;
+  onSelect: (id: SettingsSectionId) => void;
+  children: ReactNode;
+}) {
+  const active = activeSection === sectionId;
   return (
-    <a
-      href={href}
-      className="block rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
-      onClick={(e) => {
-        e.preventDefault();
-        document.querySelector(href)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }}
+    <button
+      type="button"
+      aria-pressed={active}
+      className={`w-full text-left rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+        active
+          ? 'bg-blue-50 text-blue-900 ring-1 ring-blue-200/80'
+          : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+      }`}
+      onClick={() => onSelect(sectionId)}
     >
       {children}
-    </a>
+    </button>
   );
 }
 
@@ -145,6 +178,18 @@ export default function Settings() {
   const isAdmin = (role || '').toLowerCase() === 'admin';
   const canEditScope =
     (role || '').toLowerCase() === 'compliance_officer' || (role || '').toLowerCase() === 'chief_compliance_officer';
+
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('account');
+
+  useEffect(() => {
+    if (activeSection === 'scope' && !canEditScope) {
+      setActiveSection('account');
+      return;
+    }
+    if (!isAdmin && ADMIN_ONLY_SECTIONS.includes(activeSection)) {
+      setActiveSection('account');
+    }
+  }, [activeSection, canEditScope, isAdmin]);
 
   const catalogQuery = useQuery({
     queryKey: ['auth', 'catalog-zones'],
@@ -321,8 +366,7 @@ export default function Settings() {
         <header className="mb-8">
           <h1 className="text-2xl font-bold tracking-tight text-slate-900">Settings</h1>
           <p className="text-slate-600 mt-2 max-w-2xl text-sm sm:text-base leading-relaxed">
-            Manage your account, data scope, and organization-wide AML configuration. Jump to any section from the
-            sidebar on larger screens.
+            Choose a topic in the sidebar to work on one area at a time. Your selection stays until you pick another.
           </p>
         </header>
 
@@ -337,11 +381,19 @@ export default function Settings() {
               </p>
               <ul className="space-y-0.5">
                 <li>
-                  <SettingsNavLink href="#settings-account">Account & password</SettingsNavLink>
+                  <SettingsNavItem
+                    sectionId="account"
+                    activeSection={activeSection}
+                    onSelect={setActiveSection}
+                  >
+                    Account & password
+                  </SettingsNavItem>
                 </li>
                 {canEditScope ? (
                   <li>
-                    <SettingsNavLink href="#settings-scope">Zone & branch scope</SettingsNavLink>
+                    <SettingsNavItem sectionId="scope" activeSection={activeSection} onSelect={setActiveSection}>
+                      Zone & branch scope
+                    </SettingsNavItem>
                   </li>
                 ) : null}
                 {isAdmin ? (
@@ -352,27 +404,49 @@ export default function Settings() {
                       </span>
                     </li>
                     <li>
-                      <SettingsNavLink href="#settings-users">User management</SettingsNavLink>
+                      <SettingsNavItem sectionId="users" activeSection={activeSection} onSelect={setActiveSection}>
+                        User management
+                      </SettingsNavItem>
                     </li>
                     <li>
-                      <SettingsNavLink href="#settings-workflow">Workflow shortcuts</SettingsNavLink>
+                      <SettingsNavItem sectionId="workflow" activeSection={activeSection} onSelect={setActiveSection}>
+                        Workflow shortcuts
+                      </SettingsNavItem>
                     </li>
                     <li>
-                      <SettingsNavLink href="#settings-reference-lists">Reference lists</SettingsNavLink>
+                      <SettingsNavItem
+                        sectionId="reference-lists"
+                        activeSection={activeSection}
+                        onSelect={setActiveSection}
+                      >
+                        Reference lists
+                      </SettingsNavItem>
                     </li>
                     <li>
-                      <SettingsNavLink href="#settings-red-flags">Red-flag rules</SettingsNavLink>
+                      <SettingsNavItem sectionId="red-flags" activeSection={activeSection} onSelect={setActiveSection}>
+                        Red-flag rules
+                      </SettingsNavItem>
                     </li>
                     <li>
-                      <SettingsNavLink href="#settings-reporting">Institution reporting</SettingsNavLink>
+                      <SettingsNavItem sectionId="reporting" activeSection={activeSection} onSelect={setActiveSection}>
+                        Institution reporting
+                      </SettingsNavItem>
                     </li>
                     <li>
-                      <SettingsNavLink href="#settings-ai">AI provider</SettingsNavLink>
+                      <SettingsNavItem sectionId="ai" activeSection={activeSection} onSelect={setActiveSection}>
+                        AI provider
+                      </SettingsNavItem>
                     </li>
                   </>
                 ) : null}
                 <li className={isAdmin ? 'pt-2 mt-2 border-t border-slate-100' : ''}>
-                  <SettingsNavLink href="#settings-preferences">Preferences</SettingsNavLink>
+                  <SettingsNavItem
+                    sectionId="preferences"
+                    activeSection={activeSection}
+                    onSelect={setActiveSection}
+                  >
+                    Preferences
+                  </SettingsNavItem>
                 </li>
               </ul>
             </nav>
@@ -383,9 +457,9 @@ export default function Settings() {
             ) : null}
           </aside>
 
-          <div className="flex-1 min-w-0 space-y-6 w-full">
+          <div className="flex-1 min-w-0 w-full">
+            {activeSection === 'account' && (
             <SettingsSectionCard
-              id="settings-account"
               title="Account & password"
               description="Change your password. Use a strong password with at least 8 characters."
             >
@@ -442,10 +516,10 @@ export default function Settings() {
             </button>
           </form>
             </SettingsSectionCard>
+            )}
 
-        {canEditScope && (
+        {canEditScope && activeSection === 'scope' && (
           <SettingsSectionCard
-            id="settings-scope"
             title="Zone & branch scope"
             description="Compliance and CCO users can choose Southwest zones and branch codes. Transactions and alerts are filtered to customers mapped into those branches (demo: branch is derived from customer ID)."
           >
@@ -485,9 +559,8 @@ export default function Settings() {
           </SettingsSectionCard>
         )}
 
-        {isAdmin && (
+        {isAdmin && activeSection === 'users' && (
           <SettingsSectionCard
-            id="settings-users"
             title="User management"
             description="Create users with roles and comma-separated zone / branch lists."
             badge={
@@ -567,9 +640,8 @@ export default function Settings() {
           </SettingsSectionCard>
         )}
 
-        {isAdmin && (
+        {isAdmin && activeSection === 'workflow' && (
           <SettingsSectionCard
-            id="settings-workflow"
             title="Compliance workflow shortcuts"
             description={
               <>
@@ -648,9 +720,8 @@ export default function Settings() {
           </SettingsSectionCard>
         )}
 
-        {isAdmin && (
+        {isAdmin && activeSection === 'reference-lists' && (
           <SettingsSectionCard
-            id="settings-reference-lists"
             title="Reference lists"
             description={
               <>
@@ -764,9 +835,8 @@ export default function Settings() {
           </SettingsSectionCard>
         )}
 
-        {isAdmin && (
+        {isAdmin && activeSection === 'red-flags' && (
           <SettingsSectionCard
-            id="settings-red-flags"
             title="AML red-flag rule library"
             description={
               <>
@@ -904,9 +974,8 @@ export default function Settings() {
           </SettingsSectionCard>
         )}
 
-        {isAdmin && (
+        {isAdmin && activeSection === 'reporting' && (
           <SettingsSectionCard
-            id="settings-reporting"
             title="Institution reporting"
             description="Template pack, entity names, and the regulatory return calendar drive goAML-style stubs, STR/XML headers, and FTR XML. Adjust for your institution."
             badge={
@@ -1197,9 +1266,8 @@ export default function Settings() {
           </SettingsSectionCard>
         )}
 
-        {isAdmin && (
+        {isAdmin && activeSection === 'ai' && (
           <SettingsSectionCard
-            id="settings-ai"
             title="AI provider"
             description="Choose the model provider for decision-support and report narratives. Gemini is the default."
             badge={
@@ -1256,8 +1324,8 @@ export default function Settings() {
           </SettingsSectionCard>
         )}
 
+            {activeSection === 'preferences' && (
             <SettingsSectionCard
-              id="settings-preferences"
               title="Preferences"
               description="Additional options (notifications, language, and display) can be extended here."
             >
@@ -1265,6 +1333,7 @@ export default function Settings() {
                 No configurable preferences yet. Check back after future releases.
               </p>
             </SettingsSectionCard>
+            )}
           </div>
         </div>
       </div>
