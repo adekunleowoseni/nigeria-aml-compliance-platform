@@ -88,8 +88,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # No host port: avoids clash with OS/package Redis on 6379; apps use hostname `redis` on aml-net.
+    # To expose for local redis-cli debugging only: add → ports: ["16379:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s

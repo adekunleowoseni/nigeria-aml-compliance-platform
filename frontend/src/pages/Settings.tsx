@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import DashboardLayout from '../components/layout/DashboardLayout';
 import {
@@ -29,6 +29,72 @@ function mapLoginUserToStore(u: {
     amlZones: u.aml_zones,
     amlBranchCodes: u.aml_branch_codes,
   };
+}
+
+function SettingsMessageBanner({
+  message,
+}: {
+  message: { type: 'success' | 'error'; text: string } | null;
+}) {
+  if (!message) return null;
+  return (
+    <div
+      className={`mb-4 p-3 rounded-lg text-sm border ${
+        message.type === 'success'
+          ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+          : 'bg-red-50 text-red-800 border-red-200'
+      }`}
+    >
+      {message.text}
+    </div>
+  );
+}
+
+function SettingsSectionCard({
+  id,
+  title,
+  description,
+  badge,
+  children,
+}: {
+  id?: string;
+  title: string;
+  description?: ReactNode;
+  badge?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      id={id}
+      className="bg-white rounded-xl border border-slate-200/90 shadow-sm scroll-mt-24 overflow-hidden"
+    >
+      <header className="px-5 py-4 border-b border-slate-100 bg-gradient-to-r from-slate-50/90 to-white">
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold text-slate-900 tracking-tight">{title}</h2>
+            {description ? <p className="text-sm text-slate-600 mt-1 leading-relaxed">{description}</p> : null}
+          </div>
+          {badge ? <div className="shrink-0">{badge}</div> : null}
+        </div>
+      </header>
+      <div className="p-5">{children}</div>
+    </section>
+  );
+}
+
+function SettingsNavLink({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      className="block rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors"
+      onClick={(e) => {
+        e.preventDefault();
+        document.querySelector(href)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }}
+    >
+      {children}
+    </a>
+  );
 }
 
 export default function Settings() {
@@ -218,7 +284,7 @@ export default function Settings() {
     if (p) setSelectedProvider(p);
   }, [aiSettingsQuery.data?.provider]);
 
-  const handleChangePassword = async (e: React.FormEvent) => {
+  const handleChangePassword = async (e: FormEvent) => {
     e.preventDefault();
     if (newPassword !== confirmPassword) {
       setMessage({ type: 'error', text: 'New password and confirmation do not match.' });
@@ -251,20 +317,79 @@ export default function Settings() {
 
   return (
     <DashboardLayout>
-      <h1 className="text-2xl font-bold text-slate-900 mb-2">Settings</h1>
-      <p className="text-slate-600 mb-6">User preferences and system configuration.</p>
+      <div className="max-w-7xl mx-auto pb-10">
+        <header className="mb-8">
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900">Settings</h1>
+          <p className="text-slate-600 mt-2 max-w-2xl text-sm sm:text-base leading-relaxed">
+            Manage your account, data scope, and organization-wide AML configuration. Jump to any section from the
+            sidebar on larger screens.
+          </p>
+        </header>
 
-      <div className="max-w-xl space-y-8">
-        <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">Account settings</h2>
-          <p className="text-sm text-slate-600 mb-4">Change your password. Use a strong password with at least 8 characters.</p>
-          {message && (
-            <div
-              className={`mb-4 p-3 rounded text-sm ${message.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}
+        <div className="flex flex-col xl:flex-row gap-8 xl:gap-10 items-start">
+          <aside className="w-full xl:w-60 shrink-0 xl:sticky xl:top-20 space-y-3 order-first xl:order-none">
+            <nav
+              className="rounded-xl border border-slate-200/90 bg-white p-3 shadow-sm"
+              aria-label="Settings sections"
             >
-              {message.text}
-            </div>
-          )}
+              <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider px-2 mb-2">
+                On this page
+              </p>
+              <ul className="space-y-0.5">
+                <li>
+                  <SettingsNavLink href="#settings-account">Account & password</SettingsNavLink>
+                </li>
+                {canEditScope ? (
+                  <li>
+                    <SettingsNavLink href="#settings-scope">Zone & branch scope</SettingsNavLink>
+                  </li>
+                ) : null}
+                {isAdmin ? (
+                  <>
+                    <li className="pt-2 mt-2 border-t border-slate-100">
+                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider px-2 block mb-1">
+                        Administration
+                      </span>
+                    </li>
+                    <li>
+                      <SettingsNavLink href="#settings-users">User management</SettingsNavLink>
+                    </li>
+                    <li>
+                      <SettingsNavLink href="#settings-workflow">Workflow shortcuts</SettingsNavLink>
+                    </li>
+                    <li>
+                      <SettingsNavLink href="#settings-reference-lists">Reference lists</SettingsNavLink>
+                    </li>
+                    <li>
+                      <SettingsNavLink href="#settings-red-flags">Red-flag rules</SettingsNavLink>
+                    </li>
+                    <li>
+                      <SettingsNavLink href="#settings-reporting">Institution reporting</SettingsNavLink>
+                    </li>
+                    <li>
+                      <SettingsNavLink href="#settings-ai">AI provider</SettingsNavLink>
+                    </li>
+                  </>
+                ) : null}
+                <li className={isAdmin ? 'pt-2 mt-2 border-t border-slate-100' : ''}>
+                  <SettingsNavLink href="#settings-preferences">Preferences</SettingsNavLink>
+                </li>
+              </ul>
+            </nav>
+            {!isAdmin ? (
+              <p className="text-xs text-slate-500 leading-relaxed px-1 hidden xl:block">
+                Organization-wide options appear when you sign in as an administrator.
+              </p>
+            ) : null}
+          </aside>
+
+          <div className="flex-1 min-w-0 space-y-6 w-full">
+            <SettingsSectionCard
+              id="settings-account"
+              title="Account & password"
+              description="Change your password. Use a strong password with at least 8 characters."
+            >
+              <SettingsMessageBanner message={message} />
           <form onSubmit={handleChangePassword} className="space-y-4">
             <div>
               <label htmlFor="current-password" className="block text-sm font-medium text-slate-700 mb-1">
@@ -316,22 +441,15 @@ export default function Settings() {
               {loading ? 'Updating…' : 'Change password'}
             </button>
           </form>
-        </section>
+            </SettingsSectionCard>
 
         {canEditScope && (
-          <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-2">Zone & branch scope</h2>
-            <p className="text-sm text-slate-600 mb-4">
-              Compliance and CCO users can adjust which Southwest zones and branch codes they work with. Transactions and
-              alerts are filtered to customers mapped into those branches (demo: assigned automatically from customer ID).
-            </p>
-            {scopeMessage && (
-              <div
-                className={`mb-3 p-3 rounded text-sm ${scopeMessage.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}
-              >
-                {scopeMessage.text}
-              </div>
-            )}
+          <SettingsSectionCard
+            id="settings-scope"
+            title="Zone & branch scope"
+            description="Compliance and CCO users can choose Southwest zones and branch codes. Transactions and alerts are filtered to customers mapped into those branches (demo: branch is derived from customer ID)."
+          >
+            <SettingsMessageBanner message={scopeMessage} />
             {catalogQuery.isLoading ? (
               <p className="text-sm text-slate-500">Loading catalog…</p>
             ) : (
@@ -364,20 +482,21 @@ export default function Settings() {
                 </button>
               </>
             )}
-          </section>
+          </SettingsSectionCard>
         )}
 
         {isAdmin && (
-          <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-2">User management (admin)</h2>
-            <p className="text-sm text-slate-600 mb-4">Create compliance users with zone/branch lists (comma-separated).</p>
-            {adminMsg && (
-              <div
-                className={`mb-3 p-3 rounded text-sm ${adminMsg.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}
-              >
-                {adminMsg.text}
-              </div>
-            )}
+          <SettingsSectionCard
+            id="settings-users"
+            title="User management"
+            description="Create users with roles and comma-separated zone / branch lists."
+            badge={
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200/80 rounded-md px-2 py-0.5">
+                Admin
+              </span>
+            }
+          >
+            <SettingsMessageBanner message={adminMsg} />
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
               <input
                 className="text-sm border rounded px-2 py-2"
@@ -445,23 +564,26 @@ export default function Settings() {
                 ))}
               </ul>
             )}
-          </section>
+          </SettingsSectionCard>
         )}
 
         {isAdmin && (
-          <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-2">Compliance workflow shortcuts (admin)</h2>
-            <p className="text-sm text-slate-600 mb-4">
-              Defaults require a compliance officer to <strong>escalate</strong> and the CCO to approve before STR or OTC ESTR/ESAR
-              generation. Enable these only for demos or training environments.
-            </p>
-            {workflowMsg && (
-              <div
-                className={`mb-3 p-3 rounded text-sm ${workflowMsg.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}
-              >
-                {workflowMsg.text}
-              </div>
-            )}
+          <SettingsSectionCard
+            id="settings-workflow"
+            title="Compliance workflow shortcuts"
+            description={
+              <>
+                Defaults require a compliance officer to <strong>escalate</strong> and the CCO to approve before STR or
+                OTC ESTR/ESAR generation. Enable these only for demos or training.
+              </>
+            }
+            badge={
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200/80 rounded-md px-2 py-0.5">
+                Admin
+              </span>
+            }
+          >
+            <SettingsMessageBanner message={workflowMsg} />
             {workflowQuery.isLoading ? (
               <p className="text-sm text-slate-500">Loading workflow settings…</p>
             ) : workflowQuery.isError ? (
@@ -523,24 +645,27 @@ export default function Settings() {
                 </button>
               </div>
             )}
-          </section>
+          </SettingsSectionCard>
         )}
 
         {isAdmin && (
-          <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-2">Reference lists — sanctions, PEP, adverse media (admin)</h2>
-            <p className="text-sm text-slate-600 mb-4">
-              Upload lists as <strong>JSON arrays</strong> or <strong>XML</strong> ({'<items><item>…</item></items>'} style).
-              Names are matched with <strong>fuzzy scoring</strong> against customers (not exact string equality). The platform
-              can rescreen the merged customer base on a schedule (default every 24h in the API process, or via Celery Beat).
-            </p>
-            {refListMsg && (
-              <div
-                className={`mb-3 p-3 rounded text-sm ${refListMsg.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}
-              >
-                {refListMsg.text}
-              </div>
-            )}
+          <SettingsSectionCard
+            id="settings-reference-lists"
+            title="Reference lists"
+            description={
+              <>
+                Upload <strong>JSON</strong> or <strong>XML</strong> ({'<items><item>…</item></items>'}) for sanctions,
+                PEP, and adverse media. Names use fuzzy matching against customers. Full-database screening can run on a
+                schedule (API or Celery Beat).
+              </>
+            }
+            badge={
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200/80 rounded-md px-2 py-0.5">
+                Admin
+              </span>
+            }
+          >
+            <SettingsMessageBanner message={refListMsg} />
             {referenceListsQ.isLoading ? (
               <p className="text-sm text-slate-500">Loading reference list counts…</p>
             ) : referenceListsQ.isError ? (
@@ -636,32 +761,34 @@ export default function Settings() {
                 </div>
               </div>
             )}
-          </section>
+          </SettingsSectionCard>
         )}
 
         {isAdmin && (
-          <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-2">AML red-flag rule library (admin)</h2>
-            <p className="text-sm text-slate-600 mb-4">
-              Map regulatory or internal <strong>rule titles</strong> to <strong>full descriptions</strong> and optional{' '}
-              <strong>match_patterns</strong> (keywords, OR-matched on narration, remarks, KYC remarks, counterparty, and
-              metadata). The configured LLM also uses remarks plus a <strong>customer activity summary</strong> to
-              map transactions to catalog <code className="text-xs bg-slate-100 px-1 rounded">rule_code</code>s and can
-              raise <span className="font-mono text-xs">RF-AI-EXT-*</span> when no catalog entry fits. Optional logging:{' '}
-              <span className="font-mono text-xs">AML_RED_FLAG_AI_OBSERVATION_LOG</span>. Use prefix{' '}
-              <code className="text-xs bg-slate-100 px-1 rounded">regex:</code> for regular expressions. Upload a JSON{' '}
-              <strong>array</strong> or object with <code className="text-xs bg-slate-100 px-1 rounded">rules</code> /{' '}
-              <code className="text-xs bg-slate-100 px-1 rounded">items</code>. Starter:{' '}
-              <span className="font-mono text-xs">backend/data/red_flag_rules_starter.json</span>. Alerts include{' '}
-              <span className="font-mono text-xs">RF-…</span> and typologies.
-            </p>
-            {rfMsg && (
-              <div
-                className={`mb-3 p-3 rounded text-sm ${rfMsg.type === 'success' ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'}`}
-              >
-                {rfMsg.text}
-              </div>
-            )}
+          <SettingsSectionCard
+            id="settings-red-flags"
+            title="AML red-flag rule library"
+            description={
+              <>
+                Map <strong>titles</strong> to <strong>descriptions</strong> and optional <strong>match_patterns</strong>{' '}
+                (keywords OR-matched on narration, remarks, KYC, counterparty, metadata). The LLM uses remarks plus a{' '}
+                <strong>customer activity summary</strong> to map to catalog{' '}
+                <code className="text-xs bg-slate-100 px-1 rounded">rule_code</code>s and can raise{' '}
+                <span className="font-mono text-xs">RF-AI-EXT-*</span> when nothing fits. Optional:{' '}
+                <span className="font-mono text-xs">AML_RED_FLAG_AI_OBSERVATION_LOG</span>. Use{' '}
+                <code className="text-xs bg-slate-100 px-1 rounded">regex:</code> for regex. Upload JSON{' '}
+                <strong>array</strong> or <code className="text-xs bg-slate-100 px-1 rounded">rules</code> /{' '}
+                <code className="text-xs bg-slate-100 px-1 rounded">items</code>. Starter:{' '}
+                <span className="font-mono text-xs">backend/data/red_flag_rules_starter.json</span>.
+              </>
+            }
+            badge={
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200/80 rounded-md px-2 py-0.5">
+                Admin
+              </span>
+            }
+          >
+            <SettingsMessageBanner message={rfMsg} />
             {redFlagsQ.isLoading ? (
               <p className="text-sm text-slate-500">Loading red-flag rules…</p>
             ) : redFlagsQ.isError ? (
@@ -774,27 +901,21 @@ export default function Settings() {
                 ) : null}
               </div>
             )}
-          </section>
+          </SettingsSectionCard>
         )}
 
         {isAdmin && (
-          <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-2">Institution reporting (admin)</h2>
-            <p className="text-sm text-slate-600 mb-4">
-              Template pack, legal reporting entity name, and regulatory return calendar drive goAML-style stubs, STR/XML
-              headers, and FTR XML. Seeded defaults align with CBN-style obligations; adjust for your licensed institution.
-            </p>
-            {reportingMsg && (
-              <div
-                className={`mb-3 p-3 rounded text-sm ${
-                  reportingMsg.type === 'success'
-                    ? 'bg-green-50 text-green-800 border border-green-200'
-                    : 'bg-red-50 text-red-800 border border-red-200'
-                }`}
-              >
-                {reportingMsg.text}
-              </div>
-            )}
+          <SettingsSectionCard
+            id="settings-reporting"
+            title="Institution reporting"
+            description="Template pack, entity names, and the regulatory return calendar drive goAML-style stubs, STR/XML headers, and FTR XML. Adjust for your institution."
+            badge={
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200/80 rounded-md px-2 py-0.5">
+                Admin
+              </span>
+            }
+          >
+            <SettingsMessageBanner message={reportingMsg} />
             {reportingProfileQ.isLoading ? (
               <p className="text-sm text-slate-500 mb-6">Loading reporting profile…</p>
             ) : reportingProfileQ.isError ? (
@@ -1073,26 +1194,21 @@ export default function Settings() {
                 </div>
               </>
             )}
-          </section>
+          </SettingsSectionCard>
         )}
 
         {isAdmin && (
-          <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-            <h2 className="text-lg font-semibold text-slate-900 mb-4">AI provider (admin)</h2>
-            <p className="text-sm text-slate-600 mb-4">
-              Select which AI provider powers decision-support and report narrative generation. Gemini is the default.
-            </p>
-            {aiMessage && (
-              <div
-                className={`mb-4 p-3 rounded text-sm ${
-                  aiMessage.type === 'success'
-                    ? 'bg-green-50 text-green-800 border border-green-200'
-                    : 'bg-red-50 text-red-800 border border-red-200'
-                }`}
-              >
-                {aiMessage.text}
-              </div>
-            )}
+          <SettingsSectionCard
+            id="settings-ai"
+            title="AI provider"
+            description="Choose the model provider for decision-support and report narratives. Gemini is the default."
+            badge={
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200/80 rounded-md px-2 py-0.5">
+                Admin
+              </span>
+            }
+          >
+            <SettingsMessageBanner message={aiMessage} />
             {aiSettingsQuery.isLoading ? (
               <p className="text-sm text-slate-500">Loading AI settings…</p>
             ) : aiSettingsQuery.isError ? (
@@ -1137,13 +1253,20 @@ export default function Settings() {
                 </button>
               </div>
             )}
-          </section>
+          </SettingsSectionCard>
         )}
 
-        <section className="bg-white rounded-lg shadow p-6 border border-slate-100">
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">Preferences</h2>
-          <p className="text-sm text-slate-600">Additional options (e.g. notifications, language) can be added here.</p>
-        </section>
+            <SettingsSectionCard
+              id="settings-preferences"
+              title="Preferences"
+              description="Additional options (notifications, language, and display) can be extended here."
+            >
+              <p className="text-sm text-slate-600">
+                No configurable preferences yet. Check back after future releases.
+              </p>
+            </SettingsSectionCard>
+          </div>
+        </div>
       </div>
     </DashboardLayout>
   );
