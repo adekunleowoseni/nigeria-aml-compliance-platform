@@ -1,0 +1,29 @@
+[
+  {
+    "pep_id": "PEP-882-NG",
+    "name": "Senator Musa Abubakar",
+    "role": "Chairman, Senate Committee on Finance",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Fatima Abubakar", "relationship": "Spouse" },
+      { "name": "Aminu Musa", "relationship": "Child" }
+    ],
+    "source_of_wealth": "State Salary, Real Estate Holdings",
+    "risk_rating": "High"
+  },
+  {
+    "pep_id": "PEP-905-NG",
+    "name": "Major General Chidi Okoro",
+    "role": "Chief of Logistics, Nigerian Army",
+    "country": "Nigeria",
+    "pep_level": "Level 2 (Senior Military)",
+    "associates": [
+      { "name": "Nneka Okoro", "relationship": "Spouse" },
+      { "name": "Okoro & Sons Logistics", "relationship": "Related Business Entity" }
+    ],
+    "source_of_wealth": "Government Remuneration, Defense Contracts",
+    "risk_rating": "High",
+    "last_reviewed": "2024-01-20"
+  }
+]

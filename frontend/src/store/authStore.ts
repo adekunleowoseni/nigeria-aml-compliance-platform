@@ -5,6 +5,9 @@ export type AuthUser = {
   displayName: string;
   email?: string;
   role?: string;
+  amlRegion?: string;
+  amlZones?: string[];
+  amlBranchCodes?: string[];
 };
 
 interface AuthState {

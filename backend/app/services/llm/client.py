@@ -26,7 +26,7 @@ class LLMClient(Protocol):
     provider: str
     model: str
 
-    async def generate(self, prompt: str, system: Optional[str] = None) -> LLMResult: ...
+    async def generate(self, prompt: str, system: Optional[str] = None, temperature: Optional[float] = None) -> LLMResult: ...
 
 
 class OllamaClient:
@@ -36,9 +36,11 @@ class OllamaClient:
         self.base_url = base_url.rstrip("/")
         self.model = model
 
-    async def generate(self, prompt: str, system: Optional[str] = None) -> LLMResult:
+    async def generate(self, prompt: str, system: Optional[str] = None, temperature: Optional[float] = None) -> LLMResult:
         url = f"{self.base_url}/api/generate"
         payload: Dict[str, Any] = {"model": self.model, "prompt": prompt, "stream": False}
+        if temperature is not None:
+            payload["options"] = {"temperature": temperature}
         if system:
             payload["system"] = system
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -56,14 +58,14 @@ class OpenAIClient:
         self.api_key = api_key
         self.model = model
 
-    async def generate(self, prompt: str, system: Optional[str] = None) -> LLMResult:
+    async def generate(self, prompt: str, system: Optional[str] = None, temperature: Optional[float] = None) -> LLMResult:
         # Uses OpenAI Chat Completions-compatible endpoint
         url = "https://api.openai.com/v1/chat/completions"
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        payload = {"model": self.model, "messages": messages, "temperature": 0.2}
+        payload = {"model": self.model, "messages": messages, "temperature": 0.2 if temperature is None else temperature}
         headers = {"Authorization": f"Bearer {self.api_key}"}
         async with httpx.AsyncClient(timeout=60.0) as client:
             res = await client.post(url, json=payload, headers=headers)
@@ -80,7 +82,7 @@ class GeminiClient:
         self.api_key = api_key
         self.model = model
 
-    async def generate(self, prompt: str, system: Optional[str] = None) -> LLMResult:
+    async def generate(self, prompt: str, system: Optional[str] = None, temperature: Optional[float] = None) -> LLMResult:
         # Google Generative Language API (public REST)
         # Note: keep this minimal; production should handle safety settings and retries.
         model_path = self.model
@@ -89,7 +91,8 @@ class GeminiClient:
         if system:
             parts.append({"text": f"System: {system}"})
         parts.append({"text": prompt})
-        payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": 0.2}}
+        temp = 0.2 if temperature is None else temperature
+        payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": {"temperature": temp}}
         params = {"key": self.api_key}
         async with httpx.AsyncClient(timeout=60.0) as client:
             res = await client.post(url, params=params, json=payload)
@@ -103,7 +106,7 @@ class GeminiClient:
 
 
 def get_llm_client() -> LLMClient:
-    provider: str = (settings.llm_provider or "ollama").lower()
+    provider: str = (settings.llm_provider or "gemini").lower()
     if provider == "openai":
         if not settings.openai_api_key:
             raise RuntimeError("OPENAI_API_KEY is required when llm_provider=openai")

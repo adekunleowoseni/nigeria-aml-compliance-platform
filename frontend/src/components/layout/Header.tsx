@@ -50,7 +50,7 @@ export default function Header() {
       >
         <span className="text-xl">≡</span>
       </button>
-      <nav className="hidden sm:flex items-center gap-1 text-sm text-slate-600 flex-1 min-w-0 ml-1" aria-label="Quick links">
+      <nav className="hidden sm:flex items-center gap-2 text-sm text-slate-600 flex-1 min-w-0 ml-1 flex-wrap" aria-label="Quick links">
         <Link
           to="/compliance"
           className={`px-2 py-1.5 rounded-md whitespace-nowrap ${
@@ -59,6 +59,11 @@ export default function Header() {
         >
           Compliance
         </Link>
+        {user?.amlZones?.length || user?.amlBranchCodes?.length ? (
+          <span className="text-xs px-2 py-1 rounded bg-slate-100 text-slate-700 max-w-[280px] truncate" title="Data scope">
+            Scope: {(user.amlZones ?? []).join(', ') || 'all zones'} · branches {(user.amlBranchCodes ?? []).join(', ')}
+          </span>
+        ) : null}
       </nav>
       <div className="flex-1 sm:hidden" />
 

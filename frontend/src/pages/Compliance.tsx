@@ -1,9 +1,13 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import DashboardLayout from '../components/layout/DashboardLayout';
 import { complianceApi } from '../services/api';
+import { useAuthStore } from '../store/authStore';
 
 export default function Compliance() {
+  const role = (useAuthStore((s) => s.user?.role) || '').toLowerCase();
+  const showClosedReview = role === 'admin' || role === 'compliance_officer' || role === 'chief_compliance_officer';
   const [screenName, setScreenName] = useState('');
   const refQuery = useQuery({
     queryKey: ['compliance', 'reference-jurisdictions'],
@@ -22,6 +26,17 @@ export default function Compliance() {
         OpenSanctions search API (configure <code className="text-xs bg-slate-100 px-1 rounded">OPENSANCTIONS_API_KEY</code>{' '}
         if your environment returns 401).
       </p>
+      {showClosedReview && (
+        <p className="mb-6">
+          <Link
+            to="/compliance/closed-case-reviews"
+            className="text-blue-700 font-medium hover:underline"
+          >
+            Closed case review (CBN 5.7.b.ii)
+          </Link>
+          <span className="text-slate-600 text-sm ml-2">— periodic sampling of closed alerts and tuning proposals.</span>
+        </p>
+      )}
 
       <div className="grid gap-8 lg:grid-cols-2">
         <section className="bg-white rounded-lg shadow border border-slate-100 p-6">

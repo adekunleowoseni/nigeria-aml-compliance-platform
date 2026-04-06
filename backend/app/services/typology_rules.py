@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+from app.config import settings
 from app.services.transaction_analytics import _is_inflow, _is_outflow, _txn_ts
 
 
@@ -64,6 +66,43 @@ def _distinct_counterparties(txns: List[Dict[str, Any]], *, inflow_only: bool) -
     return out
 
 
+def dedupe_typology_hits(hits: Sequence[TypologyHit]) -> List[TypologyHit]:
+    seen: Set[str] = set()
+    out: List[TypologyHit] = []
+    for h in hits:
+        if h.rule_id in seen:
+            continue
+        seen.add(h.rule_id)
+        out.append(h)
+    return out
+
+
+def _customer_is_corporate(
+    meta: Dict[str, Any],
+    kyc_segment: Optional[str],
+    line_of_business: Optional[str],
+) -> bool:
+    seg = (kyc_segment or meta.get("customer_segment") or "").strip().lower()
+    if seg == "corporate" or (meta.get("account_class") or "").strip().lower() == "corporate":
+        return True
+    lob = (line_of_business or meta.get("line_of_business") or "").upper()
+    if any(x in lob for x in ("LIMITED", " LTD", "PLC", "L.L.C", "INC.", "INC", "COMPANY", "ENTERPRISES")):
+        return True
+    return False
+
+
+def _is_ngn(txn: Dict[str, Any]) -> bool:
+    return str(txn.get("currency") or "NGN").upper() == "NGN"
+
+
+def _rapid_substantial_in_out(window_tx: List[Dict[str, Any]], *, min_each: float) -> bool:
+    ins = sum(float(t.get("amount") or 0) for t in window_tx if _is_inflow(t))
+    outs = sum(float(t.get("amount") or 0) for t in window_tx if _is_outflow(t))
+    if ins < min_each or outs < min_each:
+        return False
+    return min(ins, outs) >= 0.25 * max(ins, outs)
+
+
 def _structuring_hint(txns: List[Dict[str, Any]], window_hours: int = 48) -> bool:
     """Several similar small credits in a short window (demo heuristic)."""
     if len(txns) < 3:
@@ -92,25 +131,101 @@ def evaluate_typologies(
     baseline_txns: Sequence[Dict[str, Any]],
     *,
     customer_profile_label: Optional[str] = None,
+    kyc_segment: Optional[str] = None,
+    expected_annual_turnover: Optional[float] = None,
+    customer_remarks: Optional[str] = None,
+    ytd_inflow_total_ngn: Optional[float] = None,
+    line_of_business: Optional[str] = None,
 ) -> List[TypologyHit]:
     """
     Rule-based AML typology hints aligned with common ML scenarios and NFIU narrative themes.
     Complements statistical anomaly detection (Isolation Forest).
     """
     hits: List[TypologyHit] = []
-    narrative = f"{txn.get('narrative') or ''} {txn.get('remarks') or ''}"
+    remarks_on_file = (customer_remarks or "").strip()
+    narrative = f"{txn.get('narrative') or ''} {txn.get('remarks') or ''} {remarks_on_file}"
     meta = txn.get("metadata") or {}
     if not isinstance(meta, dict):
         meta = {}
 
     amt = float(txn.get("amount") or 0.0)
+    is_corp_customer = _customer_is_corporate(meta, kyc_segment, line_of_business)
     cp_name = str(txn.get("counterparty_name") or meta.get("counterparty_name") or "")
     cp_id = str(txn.get("counterparty_id") or meta.get("counterparty_id") or "")
     channel = str(meta.get("channel") or txn.get("channel") or "")
+    plabel = (customer_profile_label or meta.get("profile") or meta.get("pattern") or "").lower()
 
     baseline_list = list(baseline_txns)
     amounts = _baseline_amounts(baseline_list)
     max_prior = max(amounts) if amounts else 0.0
+    prior_inflow_amts = [float(t.get("amount") or 0) for t in baseline_list if _is_inflow(t) and _is_ngn(t)]
+    max_prior_inflow = max(prior_inflow_amts) if prior_inflow_amts else 0.0
+
+    # Policy thresholds: large NGN inflows (individual vs corporate relationship)
+    if _is_inflow(txn) and _is_ngn(txn):
+        th = (
+            float(settings.aml_huge_inflow_corporate_ngn)
+            if is_corp_customer
+            else float(settings.aml_huge_inflow_individual_ngn)
+        )
+        if amt >= th:
+            seg = "corporate" if is_corp_customer else "individual"
+            hits.append(
+                TypologyHit(
+                    rule_id="TYP-HUGE-INFLOW-THRESHOLD",
+                    title="Large inbound credit vs policy threshold",
+                    narrative=(
+                        f"NGN inflow ₦{amt:,.0f} meets or exceeds the configured {seg} monitoring threshold "
+                        f"(₦{th:,.0f}); verify source of funds and purpose."
+                    ),
+                    nfiu_reference="Unusual transaction size / velocity",
+                )
+            )
+        else:
+            th0 = (
+                float(settings.aml_huge_inflow_corporate_ngn)
+                if is_corp_customer
+                else float(settings.aml_huge_inflow_individual_ngn)
+            )
+            if th0 > 0 and 0.88 * th0 <= amt < th0:
+                hits.append(
+                    TypologyHit(
+                        rule_id="TYP-NEAR-POLICY-CEILING",
+                        title="Inbound amount clustered just below policy threshold",
+                        narrative=(
+                            f"NGN inflow ₦{amt:,.0f} sits just under the configured monitoring ceiling "
+                            f"(₦{th0:,.0f}); review for deliberate threshold avoidance or splitting."
+                        ),
+                        nfiu_reference="Structuring / smurfing",
+                    )
+                )
+
+    # Declared annual turnover: cumulative YTD inflows vs expectation (KYC)
+    exp_declared = expected_annual_turnover
+    if exp_declared is None:
+        try:
+            raw_e = meta.get("expected_annual_turnover")
+            exp_declared = float(raw_e) if raw_e is not None else None
+        except (TypeError, ValueError):
+            exp_declared = None
+    ratio = float(settings.aml_turnover_exceeds_expected_ratio or 1.0)
+    if (
+        exp_declared is not None
+        and exp_declared > 0
+        and ytd_inflow_total_ngn is not None
+        and ytd_inflow_total_ngn >= exp_declared * ratio
+    ):
+        hits.append(
+            TypologyHit(
+                rule_id="TYP-YTD-EXCEEDS-DECLARED-TURNOVER",
+                title="Year-to-date inflows vs declared annual expectation",
+                narrative=(
+                    f"Calendar-year NGN inflows (≈₦{ytd_inflow_total_ngn:,.0f}) reach or exceed declared expected "
+                    f"annual turnover (≈₦{exp_declared:,.0f}) × {ratio:g}; review consistency with profile."
+                ),
+                nfiu_reference="Turnover inconsistent with profile",
+            )
+        )
 
     # 7 First-time or step-change large movement
     if amt >= 1_000_000 and max_prior > 0 and amt > max_prior * 5:
@@ -125,6 +240,42 @@ def evaluate_typologies(
                 nfiu_reference="Unusual transaction size / velocity",
             )
         )
+
+    # First large inbound when there was little or no prior inbound history
+    if _is_inflow(txn) and _is_ngn(txn) and amt >= 1_000_000:
+        if not prior_inflow_amts or max_prior_inflow < 200_000:
+            hits.append(
+                TypologyHit(
+                    rule_id="TYP-FIRST-LARGE-INFLOW",
+                    title="First or early large inbound credit",
+                    narrative=(
+                        f"Inbound ₦{amt:,.0f} with minimal or no comparable prior inflow history on file; "
+                        "treat as new SOF / economic purpose confirmation."
+                    ),
+                    nfiu_reference="Unusual transaction size / velocity",
+                )
+            )
+
+    # Inflow amount pattern break vs recent history (statistical dispersion)
+    if _is_inflow(txn) and len(prior_inflow_amts) >= 5:
+        sample = prior_inflow_amts[-40:]
+        try:
+            mu = statistics.mean(sample)
+            st = statistics.pstdev(sample)
+            if st > 0 and amt > mu + 3 * st and amt >= 300_000:
+                hits.append(
+                    TypologyHit(
+                        rule_id="TYP-PATTERN-INCONSISTENT",
+                        title="Inbound pattern inconsistent with recent history",
+                        narrative=(
+                            f"Credit size departs materially from the customer's recent inbound distribution "
+                            f"(mean ≈ ₦{mu:,.0f}); may indicate a new layer or source."
+                        ),
+                        nfiu_reference="Transaction pattern analysis",
+                    )
+                )
+        except statistics.StatisticsError:
+            pass
 
     # 13 Sudden movement (velocity in 24h window same customer)
     ts0 = _txn_ts(txn)
@@ -143,6 +294,38 @@ def evaluate_typologies(
                 nfiu_reference="Rapid movement of funds",
             )
         )
+
+    # Rapid inbound + outbound (possible pass-through / layering) in a short window
+    inout_start = ts0 - timedelta(hours=72)
+    window_io = [t for t in baseline_list if _txn_ts(t) >= inout_start] + [txn]
+    if _rapid_substantial_in_out(window_io, min_each=400_000.0):
+        hits.append(
+            TypologyHit(
+                rule_id="TYP-RAPID-INFLOW-OUTFLOW",
+                title="Substantial inbound and outbound within a short period",
+                narrative=(
+                    "In the last ~72 hours this relationship shows material credits and debits; map funds trail "
+                    "for pass-through or layering."
+                ),
+                nfiu_reference="Rapid movement of funds",
+            )
+        )
+
+    # Dormant / quiet relationship reactivated by a sizeable credit
+    if _is_inflow(txn) and _is_ngn(txn) and amt >= 500_000 and prior_inflow_amts:
+        last_in = max(_txn_ts(t) for t in baseline_list if _is_inflow(t))
+        if (ts0 - last_in).days >= 90:
+            hits.append(
+                TypologyHit(
+                    rule_id="TYP-DORMANT-REACTIVATION",
+                    title="Dormant or quiet account — large new inbound",
+                    narrative=(
+                        f"No inbound activity for approximately {(ts0 - last_in).days} days before this ₦{amt:,.0f} credit; "
+                        "confirm reactivation rationale and SOF."
+                    ),
+                    nfiu_reference="Dormant accounts / unusual activity",
+                )
+            )
 
     # 1 Fan-in: multiple sources to one account (baseline window)
     window_start = ts0 - timedelta(days=30)
@@ -192,7 +375,10 @@ def evaluate_typologies(
 
     # 4 Company to individual (metadata hint)
     if meta.get("counterparty_type") == "company" or "LTD" in cp_name.upper() or "PLC" in cp_name.upper():
-        if _is_inflow(txn) and "retail" in str(meta.get("customer_segment") or "").lower():
+        cust_seg = (kyc_segment or meta.get("customer_segment") or "").strip().lower()
+        if _is_inflow(txn) and not is_corp_customer and (
+            "retail" in cust_seg or cust_seg in ("individual", "personal", "") or "individual" in plabel
+        ):
             hits.append(
                 TypologyHit(
                     rule_id="TYP-CORP-TO-INDIVIDUAL",
@@ -220,7 +406,6 @@ def evaluate_typologies(
         )
 
     # 6 Profile / narrative mismatch
-    plabel = (customer_profile_label or meta.get("profile") or meta.get("pattern") or "").lower()
     for prof, bad_terms in PROFILE_KEYWORDS.items():
         if prof in plabel:
             for term in bad_terms:
@@ -372,5 +557,5 @@ def typology_narrative_block(hits: Sequence[TypologyHit]) -> str:
         )
     parts = []
     for i, h in enumerate(hits, 1):
-        parts.append(f"{i}. [{h.rule_id}] {h.title}: {h.narrative} (NFIU theme: {h.nfiu_reference}).")
+        parts.append(f"{i}. [{h.rule_id}] {h.title}: {h.narrative} ({h.nfiu_reference}).")
     return " ".join(parts)

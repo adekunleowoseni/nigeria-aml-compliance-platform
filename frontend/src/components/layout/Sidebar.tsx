@@ -1,17 +1,43 @@
 import { Link, useLocation } from 'react-router-dom';
+import { useAuthStore } from '../../store/authStore';
 
-const nav = [
+function complianceNavItems(role: string | undefined) {
+  const r = (role || '').toLowerCase();
+  const showClosedReview = r === 'admin' || r === 'compliance_officer' || r === 'chief_compliance_officer';
+  const items = [{ to: '/compliance', label: 'Compliance' }];
+  if (showClosedReview) {
+    items.push({ to: '/compliance/closed-case-reviews', label: 'Closed case review' });
+  }
+  return items;
+}
+
+const baseNavCore = [
   { to: '/', label: 'Dashboard' },
   { to: '/transactions', label: 'Transactions' },
+  { to: '/customers', label: 'Customers' },
   { to: '/alerts', label: 'Alerts' },
-  { to: '/compliance', label: 'Compliance' },
-  { to: '/reports', label: 'Reports' },
-  { to: '/analytics', label: 'Analytics' },
-  { to: '/settings', label: 'Settings' },
 ];
 
 export default function Sidebar() {
   const location = useLocation();
+  const role = useAuthStore((s) => s.user?.role);
+  const r = (role || '').toLowerCase();
+  const showCco = r === 'admin' || r === 'chief_compliance_officer';
+  const complianceBlock = complianceNavItems(role);
+  const restAfterCompliance = [
+    { to: '/reports', label: 'Reports' },
+    { to: '/analytics', label: 'Analytics' },
+    { to: '/settings', label: 'Settings' },
+  ];
+  const nav = showCco
+    ? [
+        ...baseNavCore,
+        { to: '/cco-review', label: 'CCO review' },
+        { to: '/audit', label: 'Audit & governance' },
+        ...complianceBlock,
+        ...restAfterCompliance,
+      ]
+    : [...baseNavCore, ...complianceBlock, ...restAfterCompliance];
   return (
     <aside className="w-56 min-h-0 h-screen sticky top-0 bg-slate-800 text-white flex flex-col shrink-0">
       <div className="p-4 border-b border-slate-700 shrink-0">

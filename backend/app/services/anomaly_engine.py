@@ -147,7 +147,6 @@ async def assess_transaction(
 
     llm_summary = None
     if triggered and not skip_llm:
-        llm = get_llm_client()
         profile_text = f"Customer profile: {customer_profile}" if customer_profile else "Customer profile: (unknown)"
         remarks = txn.get("narrative") or txn.get("remarks") or ""
         prompt = (
@@ -159,6 +158,7 @@ async def assess_transaction(
             f"Anomaly score s(x,n)={s:.2f} (trigger if >={settings.anomaly_threshold:.2f})\n"
         )
         try:
+            llm = get_llm_client()
             result = await llm.generate(prompt)
             llm_summary = result.content.strip() or None
         except Exception:

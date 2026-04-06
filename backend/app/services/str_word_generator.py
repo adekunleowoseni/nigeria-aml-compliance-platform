@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt
+
+from app.services.transaction_analytics import _is_inflow, _is_outflow
 
 
 def _stable_rand(customer_id: str) -> int:
@@ -86,7 +91,7 @@ def _int_to_words_0_999(n: int) -> str:
 
 
 def _int_to_words(n: int) -> str:
-    # Supports 0..999,999,999,999 (up to billions) which is enough for demo STR values.
+    # Supports 0..999,999,999,999 (up to billions) which is enough for STR amounts.
     if n == 0:
         return "Zero"
     if n < 0:
@@ -160,6 +165,9 @@ class CustomerKyc:
     phone_number: str
     date_of_birth: date
     id_number: str  # BVN / NIN-like placeholder
+    customer_segment: str = "individual"  # individual | corporate
+    expected_annual_turnover: Optional[float] = None
+    customer_remarks: str = ""
 
 
 def build_customer_kyc(
@@ -178,6 +186,9 @@ def build_customer_kyc(
             phone_number="XXXXXXXXXXXX",
             date_of_birth=date(1977, 9, 5),
             id_number="XXXXXXXXXXXXXX",
+            customer_segment="individual",
+            expected_annual_turnover=3_000_000.0,
+            customer_remarks="",
         )
     seed = _stable_rand(customer_id)
     first_names = [
@@ -231,6 +242,9 @@ def build_customer_kyc(
     )
     line_of_business = inferred_lob or default_lob
 
+    segment = "corporate" if (seed // 11) % 7 == 0 else "individual"
+    expected_turnover = float(1_200_000 + (seed % 180) * 45_000)
+
     return CustomerKyc(
         customer_name=customer_name,
         account_number=account_number,
@@ -240,6 +254,9 @@ def build_customer_kyc(
         phone_number=phone_number,
         date_of_birth=dob,
         id_number=bvn,
+        customer_segment=segment,
+        expected_annual_turnover=expected_turnover * (2.2 if segment == "corporate" else 1.0),
+        customer_remarks="",
     )
 
 
@@ -335,6 +352,18 @@ def _build_str_text(
     # Keep the same narrative period style from your sample.
     period_text = alert.get("period_text") or "January 1, 2025, to March 13, 2026"
 
+    suspicion_summary = (
+        "Large inflows, wire spikes, and inconsistent transaction patterns."
+        if not is_outflow
+        else "Large outflows, rapid fund movement, and inconsistent transaction patterns."
+    )
+    if "STRUCTUR" in rule_joined:
+        suspicion_summary = "Repeated deposits, structuring-like spacing, and inconsistent transaction patterns."
+    elif "SMURF" in rule_joined:
+        suspicion_summary = "Multiple inbound transfers, smurfing indicators, and inconsistent transaction patterns."
+    elif scenario and "LAYER" in scenario.upper():
+        suspicion_summary = "Large inflows, suspected layering / pass-through activity, and rapid onward transfers."
+
     return {
         "nature": nature,
         "transaction_description": tx_description,
@@ -347,83 +376,119 @@ def _build_str_text(
         "txn_amount_words": amount_words,
         "period_text": period_text,
         "narrative": narrative,
+        "is_outflow": is_outflow,
+        "suspicion_summary": suspicion_summary,
     }
 
 
-def _append_str_enrichment(doc: Document, enrichment: Dict[str, Any]) -> None:
-    """NFIU-oriented addenda: counterparty trail, typologies, screening, utilisation."""
-    doc.add_paragraph("")
+def _str_add_title(doc: Document, text: str) -> None:
     p = doc.add_paragraph()
-    r = p.add_run("ADDITIONAL ANALYTICAL CONTEXT")
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(text)
     r.bold = True
+    r.font.size = Pt(14)
 
-    bvn_accts = enrichment.get("bvn_linked_accounts") or []
-    if bvn_accts:
-        doc.add_paragraph("Accounts linked to the customer BVN / ID on file:")
-        for row in bvn_accts[:12]:
-            if isinstance(row, dict):
-                doc.add_paragraph(
-                    f"  — Account {row.get('account_number')} ({row.get('customer_name')}); customer ref {row.get('customer_id')}"
-                )
 
-    rw = enrichment.get("rolling_windows") or {}
-    if rw:
-        lm = rw.get("lifetime_for_narrative") or {}
-        ytd = rw.get("twelve_month_ytd") or {}
-        h24 = rw.get("last_24_hours") or {}
-        doc.add_paragraph(
-            f"Relationship analytics: lifetime volume approx. ₦{float(lm.get('total_inflow') or 0):,.0f} inflow / "
-            f"₦{float(lm.get('total_outflow') or 0):,.0f} outflow over {lm.get('transaction_count') or 0} transactions; "
-            f"last 12 months ₦{float(ytd.get('inflow_total') or 0):,.0f} in / ₦{float(ytd.get('outflow_total') or 0):,.0f} out; "
-            f"last 24 hours {h24.get('transaction_count') or 0} transactions."
+def _str_section_heading(doc: Document, roman: str, title: str) -> None:
+    p = doc.add_paragraph()
+    r = p.add_run(f"{roman}. {title.upper()}")
+    r.bold = True
+    r.font.size = Pt(11)
+
+
+def _str_labeled(doc: Document, label: str, value: str) -> None:
+    doc.add_paragraph(f"{label}: {value}")
+
+
+def _str_bullet(doc: Document, text: str) -> None:
+    doc.add_paragraph(f"•\t{text}")
+
+
+def _relationship_sender_to_subject(narrative: str, lob: str) -> str:
+    n = (narrative or "").lower()
+    if any(x in n for x in ("ministry", "federal", "government", "gov", "infrastructure", "public sector", "fgn")):
+        return (
+            "Unsubstantiated; no verifiable link exists between the government entity and the subject's "
+            f"stated business profile ({lob})."
         )
+    return (
+        f"Unsubstantiated from available records; no documented commercial or contractual nexus between the sender "
+        f"and the subject's declared line of business ({lob})."
+    )
 
-    ff = enrichment.get("flagged_flows") or {}
-    ins = ff.get("top_inbound_sources") or []
-    outs = ff.get("top_outbound_destinations") or []
-    if ins:
-        doc.add_paragraph("Notable inbound sources (counterparty / amount):")
-        for row in ins[:6]:
-            if isinstance(row, dict):
-                name = row.get("counterparty_name") or row.get("counterparty_id")
-                bank = row.get("bank_or_institution") or "—"
-                doc.add_paragraph(
-                    f"  — From {name} via {bank}: ₦{float(row.get('total_amount') or 0):,.0f} ({row.get('txn_count')} txns)"
-                )
-    if outs:
-        doc.add_paragraph("Notable outbound destinations:")
-        for row in outs[:6]:
-            if isinstance(row, dict):
-                name = row.get("counterparty_name") or row.get("counterparty_id")
-                bank = row.get("bank_or_institution") or "—"
-                doc.add_paragraph(
-                    f"  — To {name} via {bank}: ₦{float(row.get('total_amount') or 0):,.0f} ({row.get('txn_count')} txns)"
-                )
 
-    why = enrichment.get("why_suspicious") or {}
-    addon = why.get("nfiu_narrative_addon")
-    if addon:
-        doc.add_paragraph("Typology-aligned narrative (automated assist):")
-        doc.add_paragraph(str(addon)[:3500])
+def _flow_row_from_txn_in(txn: Dict[str, Any]) -> Dict[str, Any]:
+    meta = txn.get("metadata") if isinstance(txn.get("metadata"), dict) else {}
+    cpid = str(txn.get("counterparty_id") or meta.get("counterparty_id") or "UNKNOWN")
+    return {
+        "counterparty_id": cpid,
+        "counterparty_name": txn.get("counterparty_name") or meta.get("counterparty_name") or meta.get("ordering_party"),
+        "bank_or_institution": meta.get("sender_bank") or meta.get("originating_bank") or meta.get("bank"),
+        "total_amount": float(txn.get("amount") or 0.0),
+        "txn_count": 1,
+        "sample_narrative": str(txn.get("narrative") or "")[:500],
+    }
 
-    doc.add_paragraph(f"Adverse media / screening note: {enrichment.get('adverse_media') or 'See sanctions block below.'}")
 
-    san = enrichment.get("sanctions_screening") or {}
-    mc = int(san.get("match_count") or 0)
-    if mc > 0:
-        doc.add_paragraph(
-            f"Sanctions / watchlist screening (online): {mc} potential match(es) returned; manual adjudication required."
-        )
-        for m in (san.get("matches") or [])[:5]:
-            if isinstance(m, dict):
-                doc.add_paragraph(f"  — {m.get('caption') or m.get('id')}")
-    else:
-        note = san.get("note") or "No online list matches returned for automated query (not a clearance)."
-        doc.add_paragraph(f"Sanctions screening: {note}")
+def _flow_row_from_txn_out(txn: Dict[str, Any]) -> Dict[str, Any]:
+    meta = txn.get("metadata") if isinstance(txn.get("metadata"), dict) else {}
+    cpid = str(txn.get("counterparty_id") or meta.get("counterparty_id") or "UNKNOWN")
+    return {
+        "counterparty_id": cpid,
+        "counterparty_name": txn.get("counterparty_name") or meta.get("counterparty_name"),
+        "bank_or_institution": meta.get("beneficiary_bank") or meta.get("bank"),
+        "total_amount": float(txn.get("amount") or 0.0),
+        "txn_count": 1,
+        "sample_narrative": str(txn.get("narrative") or "")[:500],
+    }
 
-    fu = enrichment.get("funds_utilization") or {}
-    if fu.get("description"):
-        doc.add_paragraph(f"Funds utilisation (post-event review): {fu['description']}")
+
+def _resolve_inflow_rows(txn: Dict[str, Any], enrichment: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ff = (enrichment or {}).get("flagged_flows") or {}
+    rows = [x for x in (ff.get("inbound_sources_24h") or []) if isinstance(x, dict)]
+    if rows:
+        return rows
+    if _is_inflow(txn) and float(txn.get("amount") or 0) > 0:
+        return [_flow_row_from_txn_in(txn)]
+    return []
+
+
+def _resolve_outflow_rows(txn: Dict[str, Any], enrichment: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ff = (enrichment or {}).get("flagged_flows") or {}
+    rows = [x for x in (ff.get("outbound_destinations_24h") or []) if isinstance(x, dict)]
+    if rows:
+        return rows
+    if _is_outflow(txn) and float(txn.get("amount") or 0) > 0:
+        return [_flow_row_from_txn_out(txn)]
+    return []
+
+
+def _resolve_str_outflow_for_summary(
+    *,
+    alert: Dict[str, Any],
+    enrichment: Optional[Dict[str, Any]],
+    outflow_rows: List[Dict[str, Any]],
+    h24: Dict[str, Any],
+) -> tuple[float, str]:
+    """
+    Amount and a plain three-word scope note for lay readers.
+    Prefers outflows grouped with the same short window used for suspicious inflow analysis, then
+    post-credit onward movement, then rolling 24h totals.
+    """
+    from_rows = sum(float(r.get("total_amount") or 0.0) for r in outflow_rows)
+    subsequent = float(((enrichment or {}).get("funds_utilization") or {}).get("subsequent_outflow_total") or 0.0)
+    h24_out = float(h24.get("outflow_total") or 0.0)
+    alert_out = float(alert.get("outflows_total") or 0.0)
+
+    if from_rows > 0:
+        return from_rows, "around incoming funds"
+    if h24_out > 0:
+        return h24_out, "around incoming funds"
+    if subsequent > 0:
+        return subsequent, "soon after deposit"
+    if alert_out > 0:
+        return alert_out, "wider customer history"
+    return 0.0, "no outbound movement"
 
 
 def render_str_docx_bytes(
@@ -449,86 +514,226 @@ def render_str_docx_bytes(
     text = _build_str_text(customer=customer, txn=txn, alert=alert, scenario=scenario)
     amount_currency = _format_money_with_currency(float(txn.get("amount") or 0.0))
 
+    inflow_rows = _resolve_inflow_rows(txn, enrichment)
+    outflow_rows = _resolve_outflow_rows(txn, enrichment)
+
+    rw = (enrichment or {}).get("rolling_windows") or {}
+    h24 = rw.get("last_24_hours") or {}
+    gen_date = datetime.now(timezone.utc).date()
+    review_period = f"{_date_to_long(gen_date)} (STR compilation date)"
+
+    prior_max = float((enrichment or {}).get("prior_max_single_transaction") or 0.0)
+    if prior_max <= 0:
+        prior_max = 285_430.0
+    benchmark_s = _format_money_with_currency(prior_max)
+
+    inflows_total = float(alert.get("inflows_total") or 0.0)
+    if inflows_total <= 0:
+        inflows_total = float(h24.get("inflow_total") or 0.0)
+
+    outflows_total, outflow_scope_words = _resolve_str_outflow_for_summary(
+        alert=alert,
+        enrichment=enrichment,
+        outflow_rows=outflow_rows,
+        h24=h24,
+    )
+
+    total_in_s = f"₦{_format_money_2(inflows_total)}"
+    total_out_s = f"₦{_format_money_2(outflows_total)} ({outflow_scope_words})"
+
+    bvn_accts = (enrichment or {}).get("bvn_linked_accounts") or []
+    other_bvn_line = (
+        "No other accounts linked to this BVN were identified within the Bank's records."
+        if len(bvn_accts) <= 1
+        else f"Additional internal references exist on file ({len(bvn_accts) - 1} other linked record(s)); see case system."
+    )
+
     doc = Document()
-    # Title
-    title = doc.add_paragraph()
-    run = title.add_run("SUSPICIOUS TRANSACTION REPORT")
-    run.bold = True
+    _str_add_title(doc, "SUSPICIOUS TRANSACTION REPORT")
 
-    doc.add_paragraph(f"Customer Name: {customer.customer_name}")
-    doc.add_paragraph(f"Customer Account Number: {customer.account_number}")
-    doc.add_paragraph(f"Account Opened: {_date_to_long(customer.account_opened)}")
-    doc.add_paragraph(f"Customer Address: {customer.customer_address}")
-    doc.add_paragraph(f"Line of Business: {customer.line_of_business}")
-    doc.add_paragraph(f"Phone Number: {customer.phone_number}")
-    doc.add_paragraph(f"Date of Birth: {_date_to_long(customer.date_of_birth)}")
-    doc.add_paragraph(f"ID Number: {customer.id_number}")
-
-    doc.add_paragraph(f"Nature of Transaction: {text['nature']}")
-    doc.add_paragraph(f"Transaction Description: {text['transaction_description']}")
-    doc.add_paragraph(text["red_flag_explanation"])
-
-    doc.add_paragraph(
-        "The Customer commenced banking relationship with Guaranty Trust Bank Limited on "
-        f"{customer.account_opened.strftime('%B %d, %Y')}."
-    )
-    doc.add_paragraph(
-        f"The account was opened at the Asero Branch of the Bank in Ogun State, with account number {customer.account_number} "
-        f"and BVN {customer.id_number}."
-    )
-    doc.add_paragraph(
-        f"A review of the Bank's database reveals that the Customer's BVN is linked to account number {customer.account_number} in the Bank."
-    )
-
-    # Main narrative paragraph for the STR body (matches your template structure).
-    is_outflow = text["transaction_description"].lower().startswith("large outflow")
-    transfer_verb = "out of" if is_outflow else "into"
-    headline = "Large Outflow" if is_outflow else "Large Inflow"
-    util_line = (
-        "The fund has not been utilised in the customer's account as of the period of filing this report."
-    )
-    if enrichment and (enrichment.get("funds_utilization") or {}).get("description"):
-        util_line = str(enrichment["funds_utilization"]["description"])
-    doc.add_paragraph(
-        f"Further review of the account revealed that on {text['txn_date_long']}, "
-        f"{headline} of {text['txn_amount_words']} Only ({amount_currency}) was transferred "
-        f"{transfer_verb} the account of {customer.customer_name} with account number {customer.account_number}. "
-        f"{util_line}"
-    )
-
-    # Totals / processing statement (template style)
-    # We keep the period constant as in the provided sample to match the goAML narrative formatting.
-    doc.add_paragraph(
-        f"The Customer has received inflows totalling {text['inflows_total_words']} ({text['inflows_total_text']}), "
-        f"and processed outflows of {text['outflows_total_words']} ({text['outflows_total_text']}) "
-        f"in her account from {text['period_text']}."
-    )
-
-    doc.add_paragraph(f"CDD and KYC carried out on the Customer at the point of account opening classified the Customer as a {customer.line_of_business}.")
-
-    doc.add_paragraph("We have concerns over this transaction based on the following:")
-    doc.add_paragraph("1. Inconsistency with Known Occupation & Income Profile")
-    doc.add_paragraph("2. Deviation from Customer's Transaction Behaviour")
-    doc.add_paragraph("3. Lack of Clear Economic Purpose")
-    doc.add_paragraph("4. Relationship with the Sender Cannot be Substantiated")
-
-    if enrichment:
-        _append_str_enrichment(doc, enrichment)
-
-    doc.add_paragraph(
-        "ACTION TAKEN: The Bank conducted an enhanced due diligence review on the customer and the transaction. "
-        "The customer's KYC information, income profile, and historical transaction pattern were reviewed. "
-        f"The {amount_currency} inflow/outflow was identified as inconsistent with the customer's known occupation and account behaviour. "
-        "The account has been placed under enhanced monitoring. Relevant internal documentation was completed, "
-        "and a Suspicious Transaction Report is being filed with the NFIU in accordance with AML/CFT obligations."
-    )
-
+    _str_section_heading(doc, "I", "PROFILE")
+    _str_labeled(doc, "Customer Name", customer.customer_name)
+    _str_labeled(doc, "Primary Account Number", customer.account_number)
+    _str_labeled(doc, "BVN / ID Number", customer.id_number)
+    _str_labeled(doc, "Date of Birth", _date_to_long(customer.date_of_birth))
+    _str_labeled(doc, "Contact Address", customer.customer_address)
+    _str_labeled(doc, "Occupation / Line of Business", customer.line_of_business)
+    _str_labeled(doc, "Account Opening Date", _date_to_long(customer.account_opened))
     doc.add_paragraph("")
-    doc.add_paragraph("APPROVAL")
-    doc.add_paragraph("I have reviewed and confirmed that my comments have been incorporated. I am approving the filing of an STR/SAR with the NFIU.")
-    doc.add_paragraph("APPROVER: _______________________________")
-    doc.add_paragraph(approver_name.strip() or "Authorized Officer")
-    doc.add_paragraph(f"DATE: {datetime.utcnow().strftime('%B')} {datetime.utcnow().day}, {datetime.utcnow().year}")
+
+    _str_section_heading(doc, "II", "TRANSACTION SUMMARY")
+    _str_labeled(doc, "Nature of Suspicion", text["suspicion_summary"])
+    _str_labeled(doc, "Review Period", review_period)
+    _str_labeled(doc, "Total Suspicious Inflows", total_in_s)
+    _str_labeled(doc, "Total Outflows", total_out_s)
+    _str_labeled(
+        doc,
+        "Historical Benchmark",
+        f"Prior maximum single transaction was approximately {benchmark_s}.",
+    )
+    doc.add_paragraph("")
+
+    _str_section_heading(doc, "III", "BVN LINKAGE ANALYSIS (INTERNAL)")
+    _str_labeled(
+        doc,
+        "Linked Accounts (Internal)",
+        f"A review confirms the subject's BVN is linked to account number {customer.account_number}.",
+    )
+    _str_labeled(doc, "Other Internal Accounts", other_bvn_line)
+    doc.add_paragraph("")
+
+    # --- IV Inflow (single third-party vs multiple) ---
+    if len(inflow_rows) == 1:
+        _str_section_heading(doc, "IV", "INFLOW ORIGIN (THIRD-PARTY SENDER)")
+        row = inflow_rows[0]
+        ordering = str(row.get("counterparty_name") or row.get("counterparty_id") or "Unknown ordering party")
+        acct_num = str(row.get("counterparty_id") or "—")
+        obank = str(row.get("bank_or_institution") or "Not stated")
+        narr = str(row.get("sample_narrative") or text["narrative"] or "—")
+        rel = _relationship_sender_to_subject(narr, customer.line_of_business)
+        _str_bullet(doc, f"Ordering Party: {ordering}.")
+        _str_bullet(doc, f"Sender Account Number: {acct_num}.")
+        _str_bullet(doc, f"Originating Bank: {obank}.")
+        _str_bullet(doc, f'Transaction Narrative: "{narr}".')
+        _str_bullet(doc, f"Relationship to Subject: {rel}")
+    elif len(inflow_rows) > 1:
+        _str_section_heading(doc, "IV", "INFLOW ORIGIN DETAILS (MULTIPLE COUNTERPARTIES)")
+        doc.add_paragraph(
+            f"The account experienced a sharp increase in velocity via {len(inflow_rows)} distinct high-value credits:"
+        )
+        for i, row in enumerate(inflow_rows, 1):
+            nm = row.get("counterparty_name") or row.get("counterparty_id") or "Unknown"
+            amt_r = _format_money_with_currency(float(row.get("total_amount") or 0.0))
+            bk = row.get("bank_or_institution") or "—"
+            snip = (str(row.get("sample_narrative") or ""))[:160]
+            tail = f' Narrative: "{snip}…"' if snip else ""
+            _str_bullet(doc, f"Credit {i}: {nm} — {amt_r} via {bk}.{tail}")
+    else:
+        _str_section_heading(doc, "IV", "INFLOW ORIGIN DETAILS")
+        doc.add_paragraph(
+            "No distinct third-party inflow grouping was identified in the rolling 24-hour window from the transaction store. "
+            f"Flagged transaction narrative: {text['narrative']}"
+        )
+    doc.add_paragraph("")
+
+    # --- V Outflow (single beneficiary vs multiple) ---
+    if len(outflow_rows) == 1:
+        _str_section_heading(doc, "V", "OUTFLOW DISPOSITION (SINGLE BENEFICIARY)")
+        doc.add_paragraph(
+            "The following lump-sum transfer was observed immediately following the consolidation of the inflows above:"
+        )
+        row = outflow_rows[0]
+        meta = txn.get("metadata") if isinstance(txn.get("metadata"), dict) else {}
+        ben_name = str(row.get("counterparty_name") or row.get("counterparty_id") or "Unknown beneficiary")
+        related = meta.get("related_party") or meta.get("beneficiary_related_party")
+        if related or "related" in ben_name.lower():
+            ben_disp = f"{ben_name} (Related Party)"
+        else:
+            ben_disp = ben_name
+        ben_acct = str(row.get("counterparty_id") or "—")
+        ben_bank = str(row.get("bank_or_institution") or "Not stated")
+        out_amt = _format_money_with_currency(float(row.get("total_amount") or 0.0))
+        out_narr = str(row.get("sample_narrative") or meta.get("outflow_narrative") or "Settlement / onward transfer")
+        _str_bullet(doc, f"Beneficiary Name: {ben_disp}")
+        _str_bullet(doc, f"Beneficiary Account Number: {ben_acct}")
+        _str_bullet(doc, f"Beneficiary Bank: {ben_bank}")
+        _str_bullet(doc, f"Amount: {out_amt}")
+        _str_bullet(doc, f'Transaction Narrative: "{out_narr}"')
+    elif len(outflow_rows) > 1:
+        _str_section_heading(doc, "V", "OUTFLOW DISPOSITION (MULTIPLE BENEFICIARIES)")
+        doc.add_paragraph(
+            "The following transfers represent suspected layering attempts to exhaust the large inflow:"
+        )
+        for i, row in enumerate(outflow_rows, 1):
+            nm = row.get("counterparty_name") or row.get("counterparty_id") or "Unknown"
+            amt_r = _format_money_with_currency(float(row.get("total_amount") or 0.0))
+            bk = row.get("bank_or_institution") or "—"
+            _str_bullet(doc, f"Beneficiary {i}: {nm} — {amt_r} via {bk}.")
+    else:
+        _str_section_heading(doc, "V", "OUTFLOW DISPOSITION")
+        doc.add_paragraph(
+            "No distinct outbound beneficiary grouping was identified in the rolling 24-hour window from the transaction store."
+        )
+    doc.add_paragraph("")
+
+    why = (enrichment or {}).get("why_suspicious") or {}
+    addon = str(why.get("nfiu_narrative_addon") or "").strip()
+    if addon:
+        addon = re.sub(r"\[[A-Z0-9\-]+\]\s*", "", addon)
+
+    _str_section_heading(doc, "VI", "INVESTIGATION NARRATIVE")
+    h1 = doc.add_paragraph()
+    h1.add_run("1. Background & Account Activity").bold = True
+    doc.add_paragraph(
+        f"The subject has maintained a relationship with the bank since {_date_to_long(customer.account_opened)}. "
+        f'The account is classified under "{customer.line_of_business}". '
+        f"Historical activity remained modest until {text['txn_date_long']}, when elevated movement was observed relative "
+        f"to the prior single-transaction high of approximately {benchmark_s}."
+    )
+    h2 = doc.add_paragraph()
+    h2.add_run("2. The Suspicious Activity").bold = True
+    doc.add_paragraph(
+        f"The account shows inflows totalling {total_in_s} and outflows of {total_out_s}, materially exceeding the "
+        f"customer's historical profile. {text['transaction_description']}"
+    )
+    h3 = doc.add_paragraph()
+    h3.add_run("3. Red Flag Analysis").bold = True
+    typ_div = (
+        addon[:400]
+        if addon
+        else "Narratives or counterparty themes suggest typology divergence from the declared occupation and expected economic purpose."
+    )
+    _str_bullet(doc, f"Public-Sector / Typology Divergence: {typ_div}")
+    _str_bullet(
+        doc,
+        f"Transaction Velocity: Sudden volume against a prior high of {benchmark_s} indicates a step-change without clear economic justification.",
+    )
+    _str_bullet(
+        doc,
+        "Layering Indicators: Immediate or rapid onward transfers to third-party accounts suggest the layering stage of money laundering.",
+    )
+    llm_ctx = ((enrichment or {}).get("llm_additional_context") or "").strip()
+    if llm_ctx:
+        llm_ctx = re.sub(r"\[[A-Z0-9\-]+\]\s*", "", llm_ctx)
+        doc.add_paragraph("")
+        doc.add_paragraph(llm_ctx[:4000])
+    doc.add_paragraph("")
+
+    san = (enrichment or {}).get("sanctions_screening") or {}
+    mc = int(san.get("match_count") or 0) + int(san.get("reference_list_match_count") or 0)
+    san_body = (
+        f"Automated screening returned {mc} potential match(es); manual adjudication is required."
+        if mc > 0
+        else str(
+            (enrichment or {}).get("sanctions_screening_note")
+            or "Automated screening returned no direct matches at this time; this is not a clearance."
+        )
+    )
+
+    _str_section_heading(doc, "VII", "ACTION TAKEN & DISPOSITION")
+    _str_labeled(
+        doc,
+        "Enhanced Due Diligence (EDD)",
+        "The bank reviewed KYC information and income profiles, confirming the activity is a sharp deviation from normal behaviour.",
+    )
+    _str_labeled(doc, "Sanctions Screening", san_body[:800])
+    _str_labeled(doc, "Account Status", "The account has been placed under enhanced monitoring.")
+    _str_labeled(
+        doc,
+        "Regulatory Filing",
+        "This STR is being filed with the Nigeria Financial Intelligence Unit (NFIU).",
+    )
+    fu = (enrichment or {}).get("funds_utilization") or {}
+    if fu.get("description"):
+        _str_labeled(doc, "Funds utilisation (post-event)", str(fu["description"])[:800])
+    doc.add_paragraph("")
+
+    _str_section_heading(doc, "VIII", "APPROVAL")
+    _str_labeled(doc, "Approver", approver_name.strip() or "Chief Compliance Officer")
+    sig = doc.add_paragraph()
+    sig.add_run("Signature: ").bold = True
+    sig.add_run("_______________________________")
+    doc.add_paragraph(f"Date: {datetime.utcnow().strftime('%B %d, %Y')}")
 
     out = BytesIO()
     doc.save(out)

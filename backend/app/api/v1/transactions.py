@@ -1,25 +1,39 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 
-from app.api.v1.alerts import _ALERTS
+from app.api.v1.in_memory_stores import _ALERTS, _TXNS
 from app.core.security import get_current_user
+from app.db.postgres_client import PostgresClient
 from app.models.alert import AlertResponse
 from app.models.transaction import GraphResponse, TransactionCreate, TransactionResponse
 from app.services.anomaly_engine import assess_transaction, compute_anomaly_score_bulk
+from app.services.customer_kyc_db import get_or_create_customer_kyc
+from app.services.realtime_ai_txn_screening import run_realtime_ai_transaction_screening
 from app.services.temporal_simulation import generate_temporal_dataset
-from app.services.typology_rules import evaluate_typologies
+from app.services.transaction_analytics import _is_inflow, ytd_calendar_year_inflow_ngn
+from app.services.red_flag_ai_matcher import run_red_flag_llm_matcher
+from app.services.red_flag_rules_service import evaluate_custom_red_flags
+from app.services.typology_rules import TypologyHit, dedupe_typology_hits, evaluate_typologies
+from app.services.zone_branch import ensure_txn_aml_geo_metadata, txn_matches_user_scope
 
 router = APIRouter(prefix="/transactions")
 
-# In-memory store for a bootstrappable API.
-# Replace with Postgres/Neo4j in later iterations.
-_TXNS: Dict[str, TransactionResponse] = {}
 _JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+def _txn_not_soft_deleted(t: TransactionResponse) -> bool:
+    return getattr(t, "deleted_at", None) is None
+
+
+def _persist_txn_geo(txn: TransactionResponse) -> None:
+    md = ensure_txn_aml_geo_metadata(txn.metadata if isinstance(txn.metadata, dict) else None, txn.customer_id)
+    txn.metadata = md
+    _TXNS[txn.id] = txn
 
 
 def _prior_customer_baseline(txn: TransactionResponse) -> List[Dict[str, Any]]:
@@ -32,23 +46,152 @@ def _prior_customer_baseline(txn: TransactionResponse) -> List[Dict[str, Any]]:
     return [t.model_dump() for t in prior]
 
 
-async def _process_transaction_async(txn_id: str, *, skip_llm: bool = False) -> None:
+async def _process_transaction_async(
+    txn_id: str,
+    pg: Optional[PostgresClient] = None,
+    *,
+    skip_llm: bool = False,
+) -> None:
     txn = _TXNS.get(txn_id)
     if not txn:
         return
-    # Cognitive pipeline: IsolationForest on this customer's own history (plus optional global context).
+    _persist_txn_geo(txn)
+    txn = _TXNS.get(txn_id)
+    if not txn:
+        return
+    md0 = txn.metadata if isinstance(txn.metadata, dict) else {}
+    skip_llm_effective = skip_llm or (md0.get("demo_skip_llm") is True)
     baseline = _prior_customer_baseline(txn)
+    txn_dict = txn.model_dump()
+    kyc_segment: Optional[str] = None
+    expected_annual_turnover: Optional[float] = None
+    customer_remarks: Optional[str] = None
+    line_of_business: Optional[str] = None
+    customer_name: str = ""
+    if pg is not None:
+        try:
+            kyc = await get_or_create_customer_kyc(pg, txn.customer_id, txn_dict)
+            kyc_segment = (kyc.customer_segment or "").strip() or None
+            expected_annual_turnover = kyc.expected_annual_turnover
+            customer_remarks = (kyc.customer_remarks or "").strip() or None
+            line_of_business = (kyc.line_of_business or "").strip() or None
+            customer_name = (kyc.customer_name or "").strip()
+        except Exception:
+            pass
+    if not kyc_segment and isinstance(md0, dict):
+        raw_seg = md0.get("customer_segment")
+        kyc_segment = str(raw_seg).strip() if raw_seg else None
+    if expected_annual_turnover is None and isinstance(md0, dict):
+        try:
+            raw_e = md0.get("expected_annual_turnover")
+            expected_annual_turnover = float(raw_e) if raw_e is not None else None
+        except (TypeError, ValueError):
+            pass
+
     assessment = await assess_transaction(
-        txn.model_dump(),
+        txn_dict,
         baseline_txns=baseline,
-        customer_profile={"role": "unknown", "customer_id": txn.customer_id},
-        skip_llm=skip_llm,
+        customer_profile={
+            "role": "unknown",
+            "customer_id": txn.customer_id,
+            "customer_segment": kyc_segment,
+            "expected_annual_turnover": expected_annual_turnover,
+            "line_of_business": line_of_business,
+        },
+        skip_llm=skip_llm_effective,
     )
-    md0 = txn.metadata or {}
-    profile_label = (
-        str(md0.get("profile") or md0.get("pattern") or "") if isinstance(md0, dict) else ""
+    profile_label = str(md0.get("profile") or md0.get("pattern") or "") if isinstance(md0, dict) else ""
+    ytd_ngn = ytd_calendar_year_inflow_ngn(txn.customer_id, baseline, txn_dict)
+    typ_hits = evaluate_typologies(
+        txn_dict,
+        baseline,
+        customer_profile_label=profile_label,
+        kyc_segment=kyc_segment,
+        expected_annual_turnover=expected_annual_turnover,
+        customer_remarks=customer_remarks,
+        ytd_inflow_total_ngn=ytd_ngn,
+        line_of_business=line_of_business,
     )
-    typ_hits = evaluate_typologies(txn.model_dump(), baseline, customer_profile_label=profile_label)
+
+    cp_name = str(txn_dict.get("counterparty_name") or md0.get("counterparty_name") or "").strip()
+    if _is_inflow(txn_dict) and len(cp_name) >= 3:
+        from app.services.reference_lists_service import screen_customer_name
+
+        cps = screen_customer_name(cp_name)
+        if cps.get("sanctions"):
+            typ_hits.append(
+                TypologyHit(
+                    rule_id="TYP-COUNTERPARTY-REF-SANCTIONS",
+                    title="Counterparty matches internal reference sanctions list (fuzzy)",
+                    narrative=(
+                        f"The counterparty name “{cp_name}” fuzzy-matched uploaded sanctions reference data "
+                        f"(threshold {cps.get('fuzzy_threshold')})."
+                    ),
+                    nfiu_reference="Sanctions / high-risk jurisdiction",
+                )
+            )
+        if cps.get("pep"):
+            typ_hits.append(
+                TypologyHit(
+                    rule_id="TYP-COUNTERPARTY-REF-PEP",
+                    title="Counterparty matches internal PEP reference list (fuzzy)",
+                    narrative=(
+                        f"The counterparty name “{cp_name}” fuzzy-matched uploaded PEP reference data "
+                        f"(threshold {cps.get('fuzzy_threshold')})."
+                    ),
+                    nfiu_reference="PEP",
+                )
+            )
+
+    if not skip_llm_effective:
+        ai_hits = await run_realtime_ai_transaction_screening(
+            txn_dict,
+            kyc_context={
+                "customer_segment": kyc_segment or "",
+                "expected_annual_turnover": expected_annual_turnover,
+                "line_of_business": line_of_business or "",
+                "customer_remarks": customer_remarks or "",
+            },
+            baseline_inflow_count=len([t for t in baseline if _is_inflow(t)]),
+            ytd_inflow_total=ytd_ngn,
+            existing_rule_ids=[h.rule_id for h in typ_hits],
+        )
+        typ_hits = dedupe_typology_hits(list(typ_hits) + list(ai_hits))
+
+    rf_hits = await evaluate_custom_red_flags(
+        pg,
+        txn_dict,
+        customer_remarks=customer_remarks or "",
+        line_of_business=line_of_business or "",
+    )
+    typ_hits = dedupe_typology_hits(list(typ_hits) + list(rf_hits))
+
+    def _pattern_red_flag_codes(hits_list: List[TypologyHit]) -> List[str]:
+        out: List[str] = []
+        for h in hits_list:
+            rid = h.rule_id
+            if not rid.startswith("RF-") or rid.startswith("RF-AI-"):
+                continue
+            out.append(rid[3:])
+        return out
+
+    llm_rf_hits: List[TypologyHit] = []
+    if not skip_llm_effective:
+        llm_rf_hits = await run_red_flag_llm_matcher(
+            pg,
+            txn_dict,
+            baseline,
+            customer_id=txn.customer_id,
+            customer_remarks=customer_remarks or "",
+            line_of_business=line_of_business or "",
+            kyc_segment=kyc_segment or "",
+            expected_annual_turnover=expected_annual_turnover,
+            customer_name=customer_name,
+            pattern_matched_rule_codes=_pattern_red_flag_codes(rf_hits),
+            transaction_id=str(txn_dict.get("id") or txn_id),
+        )
+    typ_hits = dedupe_typology_hits(list(typ_hits) + list(llm_rf_hits))
+
     typ_rule_ids = [h.rule_id for h in typ_hits]
 
     txn.risk_score = float(assessment.anomaly_score)
@@ -84,6 +227,14 @@ async def _process_transaction_async(txn_id: str, *, skip_llm: bool = False) -> 
             float(assessment.anomaly_score),
             min(0.95, 0.35 + 0.07 * len(typ_hits)),
         )
+        demo_sv = md0.get("demo_severity")
+        if demo_sv is not None:
+            try:
+                dv = float(demo_sv)
+                if 0.0 <= dv <= 1.0:
+                    severity = max(severity, min(0.96, dv))
+            except (TypeError, ValueError):
+                pass
         alert = AlertResponse(
             transaction_id=txn.id,
             customer_id=txn.customer_id,
@@ -101,6 +252,7 @@ async def _process_transaction_async(txn_id: str, *, skip_llm: bool = False) -> 
 
 @router.post("/ingest", response_model=TransactionResponse)
 async def ingest_transaction(
+    request: Request,
     body: TransactionCreate,
     background: BackgroundTasks,
     user: Dict[str, Any] = Depends(get_current_user),
@@ -117,13 +269,14 @@ async def ingest_transaction(
         status="received",
         created_at=datetime.utcnow(),
     )
-    _TXNS[txn.id] = txn
-    background.add_task(_process_transaction_async, txn.id)
+    _persist_txn_geo(txn)
+    background.add_task(_process_transaction_async, txn.id, request.app.state.pg)
     return txn
 
 
 @router.post("/bulk-ingest")
 async def bulk_ingest(
+    request: Request,
     body: List[TransactionCreate],
     background: BackgroundTasks,
     user: Dict[str, Any] = Depends(get_current_user),
@@ -146,8 +299,8 @@ async def bulk_ingest(
                 status="received",
                 created_at=datetime.utcnow(),
             )
-            _TXNS[txn.id] = txn
-            await _process_transaction_async(txn.id)
+            _persist_txn_geo(txn)
+            await _process_transaction_async(txn.id, request.app.state.pg)
             _JOBS[job_id]["processed"] += 1
         _JOBS[job_id]["status"] = "done"
 
@@ -161,9 +314,20 @@ async def get_transaction(
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> TransactionResponse:
     txn = _TXNS.get(transaction_id)
-    if not txn:
+    if not txn or not _txn_not_soft_deleted(txn):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found")
+    _persist_txn_geo(txn)
+    txn = _TXNS.get(transaction_id)
+    if not txn_matches_user_scope(user, txn.metadata, txn.customer_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Transaction outside your zone/branch scope.")
     return txn
+
+
+def _txn_day(t: TransactionResponse) -> date:
+    ca = t.created_at
+    if isinstance(ca, datetime):
+        return ca.date()
+    return date.today()
 
 
 @router.get("/", response_model=Dict[str, Any])
@@ -175,22 +339,62 @@ async def list_transactions(
     min_amount: Optional[float] = None,
     max_amount: Optional[float] = None,
     status_filter: Optional[str] = Query(None, alias="status"),
-    entity_id: Optional[str] = None,
+    entity_id: Optional[str] = Query(None, description="Substring match on customer_id"),
+    transaction_type: Optional[str] = None,
+    q: Optional[str] = Query(None, description="Search id, customer, type, narrative"),
     user: Dict[str, Any] = Depends(get_current_user),
 ):
-    items = list(_TXNS.values())
+    for t in _TXNS.values():
+        _persist_txn_geo(t)
+    items = [
+        t
+        for t in _TXNS.values()
+        if txn_matches_user_scope(user, t.metadata, t.customer_id) and _txn_not_soft_deleted(t)
+    ]
     if status_filter:
         items = [t for t in items if t.status == status_filter]
     if min_amount is not None:
         items = [t for t in items if t.amount >= min_amount]
     if max_amount is not None:
         items = [t for t in items if t.amount <= max_amount]
+    if entity_id and str(entity_id).strip():
+        needle = str(entity_id).strip().lower()
+        items = [t for t in items if needle in (t.customer_id or "").lower()]
+    if transaction_type and str(transaction_type).strip():
+        tt = str(transaction_type).strip().lower()
+        items = [t for t in items if (t.transaction_type or "").lower() == tt]
+    if q and str(q).strip():
+        ql = str(q).strip().lower()
+        items = [
+            t
+            for t in items
+            if ql in (t.id or "").lower()
+            or ql in (t.customer_id or "").lower()
+            or ql in (t.transaction_type or "").lower()
+            or ql in (t.narrative or "").lower()
+        ]
+    sd = (start_date or "").strip()[:10]
+    ed = (end_date or "").strip()[:10]
+    if sd:
+        try:
+            d0 = datetime.fromisoformat(sd).date()
+            items = [t for t in items if _txn_day(t) >= d0]
+        except Exception:
+            pass
+    if ed:
+        try:
+            d1 = datetime.fromisoformat(ed).date()
+            items = [t for t in items if _txn_day(t) <= d1]
+        except Exception:
+            pass
+
+    items.sort(key=lambda t: t.created_at if isinstance(t.created_at, datetime) else datetime.min, reverse=True)
 
     total = len(items)
     start = (page - 1) * page_size
     end = start + page_size
     page_items = items[start:end]
-    return {"items": page_items, "total": total, "skip": start, "limit": page_size}
+    return {"items": page_items, "total": total, "page": page, "page_size": page_size, "skip": start, "limit": page_size}
 
 
 @router.get("/{transaction_id}/graph", response_model=GraphResponse)
@@ -200,7 +404,7 @@ async def get_transaction_graph(
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> GraphResponse:
     txn = _TXNS.get(transaction_id)
-    if not txn:
+    if not txn or not _txn_not_soft_deleted(txn):
         raise HTTPException(status_code=404, detail="Transaction not found")
     # Minimal graph response for UI: one node.
     return GraphResponse(nodes=[{"id": txn.id, "type": "transaction", "properties": txn.model_dump()}], edges=[])
@@ -208,13 +412,14 @@ async def get_transaction_graph(
 
 @router.post("/{transaction_id}/analyze")
 async def analyze_transaction(
+    request: Request,
     transaction_id: str,
     background: BackgroundTasks,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     if transaction_id not in _TXNS:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    background.add_task(_process_transaction_async, transaction_id)
+    background.add_task(_process_transaction_async, transaction_id, request.app.state.pg)
     return {"transaction_id": transaction_id, "status": "queued"}
 
 

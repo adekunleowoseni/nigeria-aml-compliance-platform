@@ -5,19 +5,22 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.v1.alerts import _ALERTS
-from app.api.v1.transactions import _TXNS
+from app.api.v1.alerts import _alert_visible_to_user
+from app.api.v1.in_memory_stores import _ALERTS, _TXNS
 from app.core.security import get_current_user
+from app.services.zone_branch import txn_matches_user_scope
 
 router = APIRouter(prefix="/analytics")
 
 
 @router.get("/dashboard")
 async def dashboard_metrics(user: Dict[str, Any] = Depends(get_current_user)):
-    total_txns = len(_TXNS)
-    total_alerts = len(_ALERTS)
-    high_risk = sum(1 for a in _ALERTS.values() if (a.severity or 0) >= 0.75)
-    pending_strs = sum(1 for a in _ALERTS.values() if a.status in ("open", "investigating"))
+    tx_vis = [t for t in _TXNS.values() if txn_matches_user_scope(user, t.metadata, t.customer_id)]
+    total_txns = len(tx_vis)
+    al_vis = [a for a in _ALERTS.values() if _alert_visible_to_user(user, a)]
+    total_alerts = len(al_vis)
+    high_risk = sum(1 for a in al_vis if (a.severity or 0) >= 0.75)
+    pending_strs = sum(1 for a in al_vis if a.status in ("open", "investigating"))
     return {
         "total_transactions": total_txns,
         "total_alerts": total_alerts,

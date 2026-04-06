@@ -74,6 +74,9 @@ pnpm-debug.log*
 dist/
 build/
 
+# ---- Local uploads (demo AOP forms, etc.) ----
+uploads/
+
 # ---- Docker ----
 **/.docker/
 

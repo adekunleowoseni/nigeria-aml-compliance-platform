@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample Funds Transfer Report (FTR) template — CBN 5.8.a.i (representative).
+  Replace xmlns / elements with the official CBN Funds Transfer Reporting XSD when available.
+-->
+<FundsTransferReport xmlns="urn:cbn-ng:ftr:sample-1.0" version="1.0">
+  <ReportReference>FTR-YYYY-MM-DD-0001</ReportReference>
+  <ReportId>00000000-0000-0000-0000-000000000000</ReportId>
+  <ReportingEntity>
+    <Name>Institution Legal Name</Name>
+    <Code>FI-CODE</Code>
+  </ReportingEntity>
+  <Transfer>
+    <TransactionId>txn-uuid</TransactionId>
+    <CustomerId>customer-id</CustomerId>
+    <ValueDate>2026-04-01</ValueDate>
+    <FilingDeadline>2026-04-08</FilingDeadline>
+    <Amount>1000000.00</Amount>
+    <Currency>NGN</Currency>
+    <PaymentReference>REF-123</PaymentReference>
+    <FilingStatus>DRAFT</FilingStatus>
+    <Originator>
+      <Name>Originator Full Name</Name>
+      <Account>0123456789</Account>
+      <Address>Street, City, State</Address>
+      <Country>NG</Country>
+    </Originator>
+    <Beneficiary>
+      <Name>Beneficiary Name</Name>
+      <Account>Beneficiary Account</Account>
+      <BankBIC>ABCDNGLA</BankBIC>
+      <Country>US</Country>
+    </Beneficiary>
+  </Transfer>
+</FundsTransferReport>

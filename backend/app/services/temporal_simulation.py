@@ -1,8 +1,10 @@
 """
 Generate multi-year synthetic transaction histories for AML pattern learning and scenario testing.
 
-Produces normal recurring behaviour per customer profile, then injects known suspicious patterns
-across the timeline so Isolation Forest + rules can surface outliers vs 10-year baselines.
+For every simulated customer profile: dense **baseline** activity (salary where applicable, transfers **in and out**,
+POS, routine cash deposit and **cash withdrawal**). Injects typology scenarios on staggered years, then adds
+**integration / outflow legs** after those events (wire exit, transfers out, cash withdrawal) so narratives show
+money moving on after suspicious spikes — closer to filing-ready flows than one-sided credits only.
 """
 
 from __future__ import annotations
@@ -120,8 +122,17 @@ def generate_temporal_dataset(
         txns.append(t)
         scenario_counts[code] = scenario_counts.get(code, 0) + 1
 
+    def _narrative_for_routine(typ: str) -> str:
+        if typ == "transfer_in":
+            return "NIP transfer in — family support / business receipt"
+        if typ == "transfer_out":
+            return "NIP transfer out — supplier payment / rent / school fees"
+        if typ == "pos_settlement":
+            return "POS settlement credit — retail clearing"
+        return "Routine transfer"
+
     total_days = years * 365
-    # --- Baseline: spread normal activity across the timeline ---
+    # --- Baseline: normal inflows/outflows for every simulated customer across the timeline ---
     for d in range(0, total_days, 3):  # every 3 days grid
         day = start + timedelta(days=d)
         if len(txns) >= max_transactions:
@@ -129,8 +140,8 @@ def generate_temporal_dataset(
         for p in profiles:
             if len(txns) >= max_transactions:
                 break
-            # Skip some days randomly (not every customer transacts daily)
-            if rng.random() > 0.35:
+            # Most days have some activity per customer (still sparse for realism)
+            if rng.random() > 0.26:
                 continue
             hour = rng.randint(7, 21)
             minute = rng.randint(0, 59)
@@ -149,21 +160,21 @@ def generate_temporal_dataset(
                         metadata={"pattern": "recurring_salary", "profile": p.label},
                     )
                 )
-            elif rng.random() < 0.55:
+            elif rng.random() < 0.50:
                 lo, hi = p.small_transfer_range
                 amt = rng.uniform(lo, hi)
-                typ = rng.choice(["transfer_in", "transfer_out", "pos_settlement", "transfer_in"])
+                typ = rng.choice(["transfer_in", "transfer_out", "transfer_in", "pos_settlement", "transfer_out"])
                 txns.append(
                     _tx(
                         p.customer_id,
                         when,
                         amt,
                         typ,
-                        narrative="NIP transfer in — family support / rent payment",
+                        narrative=_narrative_for_routine(typ),
                         metadata={"pattern": "routine", "profile": p.label},
                     )
                 )
-            elif rng.random() < 0.12:
+            elif rng.random() < 0.14:
                 cap = min(p.max_normal_cash, 120_000)
                 amt = rng.uniform(5_000, cap)
                 txns.append(
@@ -172,8 +183,21 @@ def generate_temporal_dataset(
                         when,
                         amt,
                         "cash_deposit",
-                        narrative="Cash lodgment — branch teller Victoria Island",
+                        narrative="Cash lodgment — branch teller",
                         metadata={"pattern": "routine_cash", "profile": p.label},
+                    )
+                )
+            elif rng.random() < 0.55:
+                cap_w = min(p.max_normal_cash, 150_000)
+                amt = rng.uniform(4_000, cap_w)
+                txns.append(
+                    _tx(
+                        p.customer_id,
+                        when,
+                        amt,
+                        "cash_withdrawal",
+                        narrative="Cash withdrawal — ATM / branch (working capital)",
+                        metadata={"pattern": "routine_cash_out", "profile": p.label},
                     )
                 )
 
@@ -196,7 +220,56 @@ def generate_temporal_dataset(
                     280_000 + i * 3_000,
                     "transfer_in",
                     narrative="UBA inward NIP — ref: family remittance batch (below typical threshold cluster)",
-                    metadata={"pattern": "smurfing", "cluster_id": f"smurf-{y}"},
+                    metadata={"pattern": "smurfing", "cluster_id": f"smurf-{y}", "leg": "in"},
+                ),
+            )
+        t_last_smurf = t0 + timedelta(minutes=5 * 17)
+        if len(txns) < max_transactions:
+            add_scenario(
+                "SMURFING_INTEGRATION_OUT",
+                _tx(
+                    "DEMO-STUDENT-UNILAG",
+                    t_last_smurf + timedelta(days=1, hours=4),
+                    4_850_000,
+                    "transfer_out",
+                    narrative="Outward NIP — consolidated sweep to second bank account (integration leg)",
+                    metadata={"pattern": "smurfing", "leg": "integration_out", "cluster_id": f"smurf-{y}"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "SMURFING_INTEGRATION_OUT",
+                _tx(
+                    "DEMO-STUDENT-UNILAG",
+                    t_last_smurf + timedelta(days=3, hours=2),
+                    3_100_000,
+                    "wire",
+                    narrative="Outward SWIFT — tuition / overseas fees (exit of pooled inflows)",
+                    metadata={"pattern": "smurfing", "leg": "wire_exit", "cluster_id": f"smurf-{y}"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "SMURFING_INTEGRATION_OUT",
+                _tx(
+                    "DEMO-STUDENT-UNILAG",
+                    t_last_smurf + timedelta(days=9),
+                    920_000,
+                    "cash_withdrawal",
+                    narrative="Cash withdrawal — living expenses after large credit run",
+                    metadata={"pattern": "smurfing", "leg": "cash_exit", "cluster_id": f"smurf-{y}"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "SMURFING_INTEGRATION_OUT",
+                _tx(
+                    "DEMO-STUDENT-UNILAG",
+                    t_last_smurf + timedelta(days=24),
+                    38_000,
+                    "transfer_in",
+                    narrative="Minor inbound — family top-up (routine after event)",
+                    metadata={"pattern": "routine", "leg": "post_cluster_in", "cluster_id": f"smurf-{y}"},
                 ),
             )
 
@@ -236,6 +309,31 @@ def generate_temporal_dataset(
                 metadata={"pattern": "layering", "leg": "out"},
             ),
         )
+        t_layer = t0 + timedelta(minutes=48)
+        if len(txns) < max_transactions:
+            add_scenario(
+                "LAYERING_PASS_THROUGH",
+                _tx(
+                    "DEMO-TRADER-ABA",
+                    t_layer + timedelta(days=2, hours=6),
+                    2_050_000,
+                    "transfer_out",
+                    narrative="Supplier payment — wholesale fabric purchase (further distribution of inbound leg)",
+                    metadata={"pattern": "layering", "leg": "integration_out"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "LAYERING_PASS_THROUGH",
+                _tx(
+                    "DEMO-TRADER-ABA",
+                    t_layer + timedelta(days=5),
+                    355_000,
+                    "transfer_in",
+                    narrative="Inbound refund — partial return from distributor (secondary inflow)",
+                    metadata={"pattern": "layering", "leg": "round_in"},
+                ),
+            )
 
     # 3) Cash vs profile (student)
     for y in range(0, years, max(1, years // 2)):
@@ -262,6 +360,31 @@ def generate_temporal_dataset(
                 metadata={"pattern": "cash_anomaly"},
             ),
         )
+        t_cash = t0 + timedelta(hours=2)
+        if len(txns) < max_transactions:
+            add_scenario(
+                "CASH_PROFILE_FOLLOWUP_OUT",
+                _tx(
+                    "DEMO-STUDENT-UNILAG",
+                    t_cash + timedelta(days=1, hours=5),
+                    4_200_000,
+                    "transfer_out",
+                    narrative="Outward transfer — fees and disbursements to third-party agent account",
+                    metadata={"pattern": "cash_anomaly", "leg": "outflow_after_deposit"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "CASH_PROFILE_FOLLOWUP_OUT",
+                _tx(
+                    "DEMO-STUDENT-UNILAG",
+                    t_cash + timedelta(days=4),
+                    1_100_000,
+                    "cash_withdrawal",
+                    narrative="Cash withdrawal — branch payout after large lodgments",
+                    metadata={"pattern": "cash_anomaly", "leg": "cash_exit"},
+                ),
+            )
 
     # 4) Structuring (worker) — amounts just under threshold
     for y in range(0, years, max(1, years // 5)):
@@ -276,6 +399,44 @@ def generate_temporal_dataset(
                     "cash_deposit",
                     narrative="Cash deposit — amount just below internal monitoring threshold (repeat sequence)",
                     metadata={"pattern": "structuring", "sequence": i},
+                ),
+            )
+        t_struct_end = t0 + timedelta(hours=18)
+        staged_total = 990_000 * 10
+        if len(txns) < max_transactions:
+            add_scenario(
+                "STRUCTURING_INTEGRATION_OUT",
+                _tx(
+                    "DEMO-WORKER-LAGOS",
+                    t_struct_end + timedelta(days=2),
+                    staged_total * 0.38,
+                    "transfer_out",
+                    narrative="Outward NIP — consolidated movement after structured cash credits",
+                    metadata={"pattern": "structuring", "leg": "integration_out_1"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "STRUCTURING_INTEGRATION_OUT",
+                _tx(
+                    "DEMO-WORKER-LAGOS",
+                    t_struct_end + timedelta(days=5),
+                    staged_total * 0.28,
+                    "transfer_out",
+                    narrative="Second outward leg — property agent / cooperative account",
+                    metadata={"pattern": "structuring", "leg": "integration_out_2"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "STRUCTURING_INTEGRATION_OUT",
+                _tx(
+                    "DEMO-WORKER-LAGOS",
+                    t_struct_end + timedelta(days=11),
+                    420_000,
+                    "cash_withdrawal",
+                    narrative="Cash withdrawal — residual balance after electronic sweeps",
+                    metadata={"pattern": "structuring", "leg": "cash_exit"},
                 ),
             )
 
@@ -294,6 +455,31 @@ def generate_temporal_dataset(
                     metadata={"pattern": "velocity", "burst_year": y},
                 ),
             )
+        t_vel_end = t0 + timedelta(minutes=2 * 39)
+        if len(txns) < max_transactions:
+            add_scenario(
+                "VELOCITY_SETTLEMENT_OUT",
+                _tx(
+                    "DEMO-MERCHANT-OGBA",
+                    t_vel_end + timedelta(hours=6),
+                    285_000,
+                    "transfer_out",
+                    narrative="Supplier settlement — inventory purchase after POS spike",
+                    metadata={"pattern": "velocity", "leg": "outflow_supplier"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "VELOCITY_SETTLEMENT_OUT",
+                _tx(
+                    "DEMO-MERCHANT-OGBA",
+                    t_vel_end + timedelta(days=1),
+                    142_000,
+                    "transfer_out",
+                    narrative="Wallet sweep — Opay / mobile money redistribution",
+                    metadata={"pattern": "velocity", "leg": "outflow_wallet"},
+                ),
+            )
 
     # 6) Sudden wire spike for low-wire profile (worker)
     for y in range(0, years, max(1, years // 3)):
@@ -306,9 +492,33 @@ def generate_temporal_dataset(
                 18_000_000,
                 "wire",
                 narrative="SWIFT inflow USD equivalent — sender Dubai commodity broker (inconsistent with IPPIS profile)",
-                metadata={"pattern": "wire_spike"},
+                metadata={"pattern": "wire_spike", "leg": "in"},
             ),
         )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "WIRE_SPIKE_OUT",
+                _tx(
+                    "DEMO-WORKER-LAGOS",
+                    t0 + timedelta(days=2),
+                    11_500_000,
+                    "transfer_out",
+                    narrative="Outward transfer — property purchase via solicitor trust account",
+                    metadata={"pattern": "wire_spike", "leg": "property_exit"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "WIRE_SPIKE_OUT",
+                _tx(
+                    "DEMO-WORKER-LAGOS",
+                    t0 + timedelta(days=5),
+                    5_200_000,
+                    "transfer_out",
+                    narrative="FX conversion outward — BDC / parallel market settlement",
+                    metadata={"pattern": "wire_spike", "leg": "fx_exit"},
+                ),
+            )
 
     # 7) Round-tripping (importer)
     for y in range(0, years, max(1, years // 4)):
@@ -336,6 +546,19 @@ def generate_temporal_dataset(
                 metadata={"pattern": "round_trip", "leg": "in"},
             ),
         )
+        t_rt = t0 + timedelta(days=3)
+        if len(txns) < max_transactions:
+            add_scenario(
+                "ROUND_TRIP_FOLLOWOUT",
+                _tx(
+                    "DEMO-IMPORTER-APAPA",
+                    t_rt + timedelta(days=4),
+                    amt * 0.72,
+                    "transfer_out",
+                    narrative="Forward outward — shipping line / customs charges (use of returned funds)",
+                    metadata={"pattern": "round_trip", "leg": "post_return_out"},
+                ),
+            )
 
     # 8) HNWI sudden crypto-like narrative (metadata only) + atypical type
     for y in range(0, years, max(1, years // 5)):
@@ -348,9 +571,33 @@ def generate_temporal_dataset(
                 25_000_000,
                 "wire",
                 narrative="FCMB SWIFT — Lloyds London ref invoice INV-8842 (size vs 10y cadence)",
-                metadata={"pattern": "channel_shift", "counterparty_risk": "high"},
+                metadata={"pattern": "channel_shift", "counterparty_risk": "high", "leg": "in"},
             ),
         )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "CHANNEL_ANOMALY_OUT",
+                _tx(
+                    "DEMO-HNWI-VI",
+                    t0 + timedelta(days=3),
+                    14_000_000,
+                    "transfer_out",
+                    narrative="Subsidiary capital injection — group treasury redistribution",
+                    metadata={"pattern": "channel_shift", "leg": "treasury_out"},
+                ),
+            )
+        if len(txns) < max_transactions:
+            add_scenario(
+                "CHANNEL_ANOMALY_OUT",
+                _tx(
+                    "DEMO-HNWI-VI",
+                    t0 + timedelta(days=9),
+                    9_200_000,
+                    "transfer_out",
+                    narrative="Real estate JV contribution — escrow outward leg",
+                    metadata={"pattern": "channel_shift", "leg": "jv_out"},
+                ),
+            )
 
     # Sort chronologically for causal baseline when scoring
     txns.sort(key=lambda t: (t.created_at, t.id))

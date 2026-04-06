@@ -1,0 +1,21 @@
+[
+  {
+    "incident_id": "AM-4412",
+    "subject": "John Okafor",
+    "headline": "CEO of Local Tech Firm Arrested for $2M Crypto Ponzi Scheme",
+    "publication": "Premium Times Nigeria",
+    "category": "Fraud / Financial Crime",
+    "sentiment": "Negative",
+    "article_url": "https://example-news.ng",
+    "verified": true,
+    "date_published": "2024-03-25"
+  },
+  {
+    "incident_id": "AM-4413",
+    "subject": "GreenEnergy Solutions",
+    "headline": "Environmental Agency Fines Company for Oil Spill in Delta State",
+    "category": "Regulatory Breach",
+    "sentiment": "Negative",
+    "date_published": "2023-12-12"
+  }
+]

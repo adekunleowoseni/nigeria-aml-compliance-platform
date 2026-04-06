@@ -35,6 +35,38 @@ def _is_outflow(txn: Dict[str, Any]) -> bool:
     return "out" in tx_type or tx_type in ("transfer_out", "withdrawal", "debit")
 
 
+def ytd_calendar_year_inflow_ngn(
+    customer_id: str,
+    baseline_txns: List[Dict[str, Any]],
+    txn: Dict[str, Any],
+) -> float:
+    """
+    Sum NGN inflows for ``customer_id`` in the same calendar year as ``txn``,
+    including the current transaction (baseline is strictly prior events).
+    """
+    y = _txn_ts(txn).year
+    total = 0.0
+    cid = str(customer_id)
+    for t in baseline_txns:
+        if str(t.get("customer_id") or "") != cid:
+            continue
+        if _txn_ts(t).year != y:
+            continue
+        if not _is_inflow(t):
+            continue
+        if str(t.get("currency") or "NGN").upper() != "NGN":
+            continue
+        total += float(t.get("amount") or 0.0)
+    if (
+        str(txn.get("customer_id") or "") == cid
+        and _txn_ts(txn).year == y
+        and _is_inflow(txn)
+        and str(txn.get("currency") or "NGN").upper() == "NGN"
+    ):
+        total += float(txn.get("amount") or 0.0)
+    return total
+
+
 @dataclass
 class FlowMetrics:
     """Rolling windows for AML narratives (NFIU-oriented)."""
