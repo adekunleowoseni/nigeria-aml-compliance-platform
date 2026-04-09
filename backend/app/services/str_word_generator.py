@@ -839,6 +839,30 @@ def _build_str_text(
     }
 
 
+def _is_placeholder_str_scaffold(s: str) -> bool:
+    t = (s or "").strip().lower()
+    return "narrative source:" in t and "xml payload" in t and "suspicious transaction report" in t
+
+
+def _merge_saved_str_notes_into_text(text: Dict[str, str], str_notes: Optional[str]) -> None:
+    """Apply officer-edited draft text into template narrative slots (Nature / Description / Clarification)."""
+    if not str_notes or not str(str_notes).strip():
+        return
+    raw = str(str_notes).strip()
+    if _is_placeholder_str_scaffold(raw):
+        return
+    parts = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
+    if len(parts) >= 3:
+        text["nature"] = _truncate_at_boundary(parts[0], _STR_FIELD_NATURE_MAX)
+        text["transaction_description"] = _truncate_at_boundary(parts[1], _STR_FIELD_TXN_DESC_MAX)
+        text["nature_clarification"] = _truncate_at_boundary(parts[2], _STR_FIELD_CLARIFY_MAX)
+    elif len(parts) == 2:
+        text["transaction_description"] = _truncate_at_boundary(parts[0], _STR_FIELD_TXN_DESC_MAX)
+        text["nature_clarification"] = _truncate_at_boundary(parts[1], _STR_FIELD_CLARIFY_MAX)
+    else:
+        text["transaction_description"] = _truncate_at_boundary(parts[0], _STR_FIELD_TXN_DESC_MAX)
+
+
 def _assemble_str_doc_payload(
     *,
     customer: CustomerKyc,
@@ -846,6 +870,7 @@ def _assemble_str_doc_payload(
     alert: Dict[str, Any],
     approver_name: str,
     enrichment: Optional[Dict[str, Any]] = None,
+    str_notes: Optional[str] = None,
 ) -> Dict[str, Any]:
     scenario = None
     rule_ids = alert.get("rule_ids") or []
@@ -862,6 +887,7 @@ def _assemble_str_doc_payload(
         scenario=scenario,
         enrichment=enrichment,
     )
+    _merge_saved_str_notes_into_text(text, str_notes)
 
     return {
         "customer": customer,
@@ -887,6 +913,7 @@ def render_str_docx_bytes(
     alert: Dict[str, Any],
     approver_name: str,
     enrichment: Optional[Dict[str, Any]] = None,
+    str_notes: Optional[str] = None,
 ) -> bytes:
     """
     Populate the bank ``New STR SUSPICIOUS TRANSACTION REPORT.docx`` stationery only (paragraphs are filled in
@@ -902,6 +929,7 @@ def render_str_docx_bytes(
         alert=alert,
         approver_name=approver_name,
         enrichment=enrichment,
+        str_notes=str_notes,
     )
 
     doc = Document(str(template_path))

@@ -1028,15 +1028,6 @@ async def get_str_draft_preview(
             "word_preview_lines": [notes] if notes else [],
             "preview_warning": "Alert is not currently eligible for STR draft preview generation.",
         }
-    # If user saved free-form draft text, preview that exact text (WYSIWYG expectation).
-    if has_saved and notes:
-        lines = [p.strip() for p in re.split(r"\n\s*\n", notes) if p.strip()]
-        return {
-            "alert_id": aid,
-            "str_notes": notes,
-            "has_saved_draft": True,
-            "word_preview_lines": lines[:120] if lines else [notes],
-        }
     lines: List[str] = []
     try:
         tmp = await _draft_str_report(request, aid, notes, user, allow_preapproval_preview=True)
@@ -1073,22 +1064,7 @@ async def download_str_draft_preview(
     if not _alert_eligible_for_str_draft_preview(alert):
         raise HTTPException(status_code=400, detail="alert is not eligible for STR draft preview")
     saved_notes = get_saved_str_draft_notes(aid)
-    has_saved = bool(saved_notes)
     notes = saved_notes or (alert.escalation_reason_notes or "").strip() or "STR draft note"
-    if has_saved and notes:
-        customer_name = str(getattr(alert, "customer_name", "") or "").strip() or "Customer"
-        docx = regulatory_narrative_docx_bytes(
-            title="Suspicious transaction report draft preview",
-            subtitle=f"Alert: {aid}",
-            narrative=notes,
-            xml_excerpt=None,
-            source_note="saved_draft_text",
-        )
-        return Response(
-            content=docx,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": _report_download_content_disposition(customer_name, "STR_DRAFT", "docx")},
-        )
     tmp = await _draft_str_report(request, aid, notes, user, allow_preapproval_preview=True)
     rid = str(tmp["report_id"])
     rec = _REPORTS.get(rid)
@@ -1140,6 +1116,29 @@ async def save_str_draft(
         details={"str_notes_length": len(saved_notes)},
     )
     return {"status": "ok", "alert_id": aid, "str_notes": saved_notes}
+
+
+@router.delete("/str/draft/{alert_id}")
+async def delete_str_draft(
+    alert_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    aid = (alert_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="alert_id is required")
+    alert = _ALERTS.get(aid)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    existed = aid in _STR_DRAFT_OVERRIDES
+    _STR_DRAFT_OVERRIDES.pop(aid, None)
+    audit_trail.record_event_from_user(
+        user,
+        action="report.str_draft.deleted",
+        resource_type="alert",
+        resource_id=aid,
+        details={"deleted": bool(existed)},
+    )
+    return {"status": "ok", "alert_id": aid, "deleted": bool(existed)}
 
 
 @router.post("/str/draft/status")
@@ -1428,16 +1427,7 @@ async def str_docx_bytes_from_report_record(
     """Build STR Word bytes from a persisted STR draft (same logic as download?format=word)."""
     txn_dict = r.get("txn") or {}
     alert_context = r.get("alert") or {}
-    saved_notes = str(r.get("str_notes") or "").strip()
-    if saved_notes:
-        # Keep final generated STR aligned with the saved draft text when user edited the draft directly.
-        return regulatory_narrative_docx_bytes(
-            title="Suspicious transaction report",
-            subtitle=f"Alert: {str(r.get('alert_id') or '').strip() or '—'}",
-            narrative=saved_notes,
-            xml_excerpt=None,
-            source_note="saved_draft_text",
-        )
+    saved_notes = str(r.get("str_notes") or "").strip() or None
     customer_id = r.get("customer_id") or alert_context.get("customer_id") or ""
     customer = await get_or_create_customer_kyc(pg, customer_id, txn_dict)
     enrichment: Optional[Dict[str, Any]] = None
@@ -1457,6 +1447,7 @@ async def str_docx_bytes_from_report_record(
         alert=alert_context,
         approver_name=_approver_display_name(user),
         enrichment=enrichment,
+        str_notes=saved_notes,
     )
 
 
@@ -1524,12 +1515,14 @@ async def download_str(
             all_txn_dicts=all_tx,
             pg=pg,
         )
+    str_notes_for_word = str(r.get("str_notes") or "").strip() or None
     doc_bytes = _render_str_docx_bytes_safe(
         customer=customer,
         txn=txn_dict,
         alert=alert_context,
         approver_name=_approver_display_name(user),
         enrichment=enrichment,
+        str_notes=str_notes_for_word,
     )
     return Response(
         content=doc_bytes,

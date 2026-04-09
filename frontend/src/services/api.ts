@@ -1325,6 +1325,11 @@ export const reportsApi = {
       `/reports/str/draft/${encodeURIComponent(alertId)}`,
       { method: 'POST', body: JSON.stringify(body) }
     ),
+  deleteSTRDraft: (alertId: string) =>
+    request<{ status: string; alert_id: string; deleted: boolean }>(
+      `/reports/str/draft/${encodeURIComponent(alertId)}`,
+      { method: 'DELETE' }
+    ),
   strDraftStatusBulk: (alertIds: string[]) =>
     request<{ items: Record<string, boolean> }>('/reports/str/draft/status', {
       method: 'POST',

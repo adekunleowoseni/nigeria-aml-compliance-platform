@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { reportsApi, leaApi, customersApi, aiApi, type Alert } from '../services/api';
+import { reportsApi, leaApi, customersApi, type Alert } from '../services/api';
 import DashboardLayout from '../components/layout/DashboardLayout';
 import { useReportActionStore } from '../store/reportActionStore';
 import { useAuthStore } from '../store/authStore';
@@ -113,8 +113,7 @@ export default function Reports() {
   const [otcWordDraftModalError, setOtcWordDraftModalError] = useState<string | null>(null);
   const [coAiHelperOpen, setCoAiHelperOpen] = useState(false);
   const [coAiInstruction, setCoAiInstruction] = useState('');
-  const [coAiRefineBusy, setCoAiRefineBusy] = useState(false);
-  const [coAiInlineMsg, setCoAiInlineMsg] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
+  const [coAiCopyFeedback, setCoAiCopyFeedback] = useState(false);
 
   const [sarModalSelectedIds, setSarModalSelectedIds] = useState<string[]>([]);
   const [sarModalSearch, setSarModalSearch] = useState('');
@@ -574,14 +573,30 @@ export default function Reports() {
     },
     []
   );
-  const editorTextFromPreview = useCallback((res: { str_notes?: string; word_preview_lines?: string[]; has_saved_draft?: boolean }) => {
-    const notes = String(res.str_notes || '').trim();
-    const fullPreview = (res.word_preview_lines || []).join('\n\n').trim();
-    if (res.has_saved_draft && notes) return notes;
-    if (fullPreview) return fullPreview;
-    if (notes && notes.toLowerCase() !== 'str draft note') return notes;
-    return fullPreview || notes || 'STR draft note';
+  const isStrScaffoldDraft = useCallback((text: string) => {
+    const t = String(text || '').toLowerCase();
+    return (
+      t.includes('suspicious transaction report') &&
+      t.includes('alert:') &&
+      t.includes('narrative source:') &&
+      t.includes('xml payload (excerpt)')
+    );
   }, []);
+  const isLowValueStrDraft = useCallback((text: string) => {
+    const t = String(text || '').trim().toLowerCase();
+    if (!t) return true;
+    if (t === 'str draft note' || t === 'suspicious transaction report') return true;
+    return t.length <= 180 && t.includes('confirmed suspicious activity') && t.includes('true positive escalation');
+  }, []);
+  const editorTextFromPreview = useCallback((res: { str_notes?: string; word_preview_lines?: string[]; has_saved_draft?: boolean }) => {
+    const rawNotes = String(res.str_notes || '').trim();
+    const notes = isStrScaffoldDraft(rawNotes) ? '' : rawNotes;
+    const fullPreview = (res.word_preview_lines || []).join('\n\n').trim();
+    if (res.has_saved_draft && notes && !isLowValueStrDraft(notes)) return notes;
+    if (fullPreview) return fullPreview;
+    if (notes && !isLowValueStrDraft(notes)) return notes;
+    return fullPreview || notes || 'STR draft note';
+  }, [isLowValueStrDraft, isStrScaffoldDraft]);
   const coAiComposedPrompt = useMemo(() => {
     if (!strDraftModalAlertId) return '';
     const draft = (strDraftNotesById[strDraftModalAlertId] || '').trim();
@@ -605,6 +620,18 @@ export default function Reports() {
       '- Return only the improved narrative text ready to paste.',
     ].join('\n');
   }, [strDraftModalAlertId, strDraftNotesById, coAiInstruction]);
+
+  const copyCoAiComposedPrompt = useCallback(async () => {
+    const text = coAiComposedPrompt.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCoAiCopyFeedback(true);
+      window.setTimeout(() => setCoAiCopyFeedback(false), 2000);
+    } catch {
+      setCoAiCopyFeedback(false);
+    }
+  }, [coAiComposedPrompt]);
 
   const ctrMutation = useMutation({
     mutationFn: () => reportsApi.generateCTR({}),
@@ -2002,11 +2029,13 @@ export default function Reports() {
       {strDraftModalAlertId && (
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50"
-          onClick={() =>
-            !strDraftBusyById[strDraftModalAlertId] &&
-            !strDraftSaveBusyById[strDraftModalAlertId] &&
-            setStrDraftModalAlertId(null)
-          }
+          onClick={() => {
+            if (strDraftBusyById[strDraftModalAlertId] || strDraftSaveBusyById[strDraftModalAlertId]) return;
+            setStrDraftModalAlertId(null);
+            setCoAiHelperOpen(false);
+            setCoAiInstruction('');
+            setCoAiCopyFeedback(false);
+          }}
           role="dialog"
           aria-modal="true"
           aria-labelledby="co-str-draft-modal-title"
@@ -2015,10 +2044,26 @@ export default function Reports() {
             className="bg-white rounded-xl shadow-xl max-w-6xl w-full p-6 max-h-[90vh] overflow-y-auto relative"
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id="co-str-draft-modal-title" className="text-lg font-semibold text-slate-900 mb-2">
-              STR draft editor (CO)
-            </h2>
-            <p className="text-xs text-slate-600 mb-3 font-mono">Alert: {strDraftModalAlertId}</p>
+            <div className="flex items-start justify-between gap-4 mb-3">
+              <div className="min-w-0">
+                <h2 id="co-str-draft-modal-title" className="text-lg font-semibold text-slate-900">
+                  STR draft editor (CO)
+                </h2>
+                <p className="text-xs text-slate-600 mt-1 font-mono">Alert: {strDraftModalAlertId}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setStrDraftModalAlertId(null);
+                  setCoAiHelperOpen(false);
+                  setCoAiInstruction('');
+                  setCoAiCopyFeedback(false);
+                }}
+                className="shrink-0 px-4 py-2 text-sm rounded-lg border border-slate-300 bg-white hover:bg-slate-50"
+              >
+                Close
+              </button>
+            </div>
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <div>
                 <p className="text-xs font-semibold text-slate-700 mb-1">Editor</p>
@@ -2069,6 +2114,10 @@ export default function Reports() {
                       if (!aid) return;
                       const v = (strDraftNotesById[aid] || '').trim();
                       if (!v) return;
+                      if (isStrScaffoldDraft(v) || isLowValueStrDraft(v)) {
+                        setStrDraftModalError('This draft text is still placeholder content. Click "Refresh preview", then edit and save real report text.');
+                        return;
+                      }
                       setStrDraftSaveBusyById((prev) => ({ ...prev, [aid]: true }));
                       try {
                         await reportsApi.saveSTRDraft(aid, { str_notes: v });
@@ -2106,6 +2155,30 @@ export default function Reports() {
                   >
                     {strDraftDownloadBusyById[strDraftModalAlertId] ? 'Downloading…' : 'Download preview (.docx)'}
                   </button>
+                  <button
+                    type="button"
+                    disabled={!!strDraftBusyById[strDraftModalAlertId] || !!strDraftSaveBusyById[strDraftModalAlertId]}
+                    onClick={async () => {
+                      const aid = strDraftModalAlertId;
+                      if (!aid) return;
+                      setStrDraftBusy(aid, true);
+                      try {
+                        await reportsApi.deleteSTRDraft(aid);
+                        const res = await reportsApi.getSTRDraftPreview(aid);
+                        setStrDraftNotesById((prev) => ({ ...prev, [aid]: editorTextFromPreview(res) }));
+                        setStrPreviewById((prev) => ({ ...prev, [aid]: res.word_preview_lines || [] }));
+                        setStrDraftSavedById((prev) => ({ ...prev, [aid]: false }));
+                        setStrDraftModalError(null);
+                      } catch (e) {
+                        setStrDraftModalError(e instanceof Error ? e.message : 'Could not reset saved draft.');
+                      } finally {
+                        setStrDraftBusy(aid, false);
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-amber-600 text-white disabled:opacity-50"
+                  >
+                    Reset saved draft
+                  </button>
                 </div>
               </div>
               <div>
@@ -2124,95 +2197,52 @@ export default function Reports() {
                 {strDraftModalError}
               </p>
             ) : null}
-            <div className="mt-4 flex justify-end">
-              <button
-                type="button"
-                onClick={() => {
-                  setStrDraftModalAlertId(null);
-                  setCoAiHelperOpen(false);
-                  setCoAiInstruction('');
-                  setCoAiRefineBusy(false);
-                  setCoAiInlineMsg(null);
-                }}
-                className="px-4 py-2 text-sm rounded-lg border border-slate-300 bg-white hover:bg-slate-50"
-              >
-                Close
-              </button>
-            </div>
             <button
               type="button"
               onClick={() => setCoAiHelperOpen((v) => !v)}
-              className="absolute bottom-4 right-4 h-12 w-12 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700"
-              title="AI reporting helper"
-              aria-label="Open AI reporting helper"
+              className="absolute bottom-4 right-4 z-20 h-12 w-12 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700"
+              title="AI chat"
+              aria-label="Open AI chat"
             >
               AI
             </button>
             {coAiHelperOpen && (
-              <div className="absolute bottom-20 right-4 w-[380px] max-w-[90vw] rounded-lg border border-indigo-200 bg-white shadow-xl p-3 z-10">
-                <p className="text-xs font-semibold text-slate-800 mb-1">AI reporting helper</p>
-                <p className="text-[11px] text-slate-500 mb-2">
-                  Type your instruction, then copy the composed prompt to your AI chat tool.
+              <div className="absolute bottom-20 right-4 w-[380px] max-w-[min(90vw,calc(100%-2rem))] rounded-lg border border-indigo-200 bg-white shadow-xl p-3 z-20 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-slate-800">AI chat</p>
+                <p className="text-[11px] text-slate-500">
+                  Add your instruction, copy the prompt below, and paste it into your AI chat. Paste the reply back into the
+                  editor if you want to use it.
                 </p>
+                <label className="text-[11px] font-medium text-slate-600">Your message</label>
                 <textarea
                   value={coAiInstruction}
-                  onChange={(e) => {
-                    setCoAiInstruction(e.target.value);
-                    if (coAiInlineMsg) setCoAiInlineMsg(null);
-                  }}
+                  onChange={(e) => setCoAiInstruction(e.target.value)}
                   rows={3}
                   placeholder="Example: Make this STR concise, plain-English, and suitable for NFIU filing."
                   className="w-full rounded border border-slate-300 px-2 py-1.5 text-xs"
                 />
-                <div className="mt-2 max-h-36 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 text-[11px] whitespace-pre-wrap">
+                <p className="text-[11px] font-medium text-slate-600">Composed prompt</p>
+                <div className="max-h-40 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 text-[11px] whitespace-pre-wrap">
                   {coAiComposedPrompt}
                 </div>
-                <div className="mt-2 flex gap-2">
-                  <button
-                    type="button"
-                    disabled={coAiRefineBusy || !strDraftModalAlertId || !(strDraftNotesById[strDraftModalAlertId] || '').trim()}
-                    onClick={async () => {
-                      if (!strDraftModalAlertId) return;
-                      const aid = strDraftModalAlertId;
-                      const draft = (strDraftNotesById[aid] || '').trim();
-                      if (!draft) return;
-                      setCoAiRefineBusy(true);
-                      setCoAiInlineMsg(null);
-                      try {
-                        const res = await aiApi.refineReport({
-                          alert_id: aid,
-                          draft_text: draft,
-                          instruction: coAiInstruction.trim() || undefined,
-                        });
-                        const refined = (res.refined_text || '').trim();
-                        if (refined) {
-                          setStrDraftNotesById((prev) => ({ ...prev, [aid]: refined }));
-                          setCoAiInlineMsg({
-                            type: 'success',
-                            text: `Report refined using ${res.provider}/${res.model}. Review and save draft edits.`,
-                          });
-                        } else {
-                          setCoAiInlineMsg({ type: 'error', text: 'AI returned empty text.' });
-                        }
-                      } catch (e) {
-                        setCoAiInlineMsg({
-                          type: 'error',
-                          text: e instanceof Error ? e.message : 'AI refinement failed.',
-                        });
-                      } finally {
-                        setCoAiRefineBusy(false);
-                      }
-                    }}
-                    className="px-2.5 py-1 text-xs rounded bg-indigo-600 text-white"
-                  >
-                    {coAiRefineBusy ? 'Refining…' : 'Refine report'}
-                  </button>
-                </div>
-                {coAiInlineMsg ? (
-                  <p className={`mt-1 text-[11px] ${coAiInlineMsg.type === 'error' ? 'text-rose-700' : 'text-emerald-700'}`}>
-                    {coAiInlineMsg.text}
-                  </p>
-                ) : null}
+                <button
+                  type="button"
+                  disabled={!coAiComposedPrompt.trim()}
+                  onClick={async () => {
+                    const text = coAiComposedPrompt.trim();
+                    if (!text) return;
+                    try {
+                      await navigator.clipboard.writeText(text);
+                      setCoAiCopyFeedback(true);
+                      window.setTimeout(() => setCoAiCopyFeedback(false), 2000);
+                    } catch {
+                      setCoAiCopyFeedback(false);
+                    }
+                  }}
+                  className="self-start px-3 py-1.5 text-xs rounded-md border border-indigo-200 bg-indigo-50 text-indigo-900 hover:bg-indigo-100 disabled:opacity-50"
+                >
+                  {coAiCopyFeedback ? 'Copied' : 'Copy prompt'}
+                </button>
               </div>
             )}
           </div>

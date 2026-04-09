@@ -306,12 +306,28 @@ export default function CcoReview() {
   };
   const setDraftBusy = (id: string, busy: boolean) =>
     setStrDraftBusyById((prev) => ({ ...prev, [id]: busy }));
+  const isStrScaffoldDraft = (text: string) => {
+    const t = String(text || '').toLowerCase();
+    return (
+      t.includes('suspicious transaction report') &&
+      t.includes('alert:') &&
+      t.includes('narrative source:') &&
+      t.includes('xml payload (excerpt)')
+    );
+  };
+  const isLowValueStrDraft = (text: string) => {
+    const t = String(text || '').trim().toLowerCase();
+    if (!t) return true;
+    if (t === 'str draft note' || t === 'suspicious transaction report') return true;
+    return t.length <= 180 && t.includes('confirmed suspicious activity') && t.includes('true positive escalation');
+  };
   const editorTextFromPreview = (res: { str_notes?: string; word_preview_lines?: string[]; has_saved_draft?: boolean }) => {
-    const notes = String(res.str_notes || '').trim();
+    const rawNotes = String(res.str_notes || '').trim();
+    const notes = isStrScaffoldDraft(rawNotes) ? '' : rawNotes;
     const fullPreview = (res.word_preview_lines || []).join('\n\n').trim();
-    if (res.has_saved_draft && notes) return notes;
+    if (res.has_saved_draft && notes && !isLowValueStrDraft(notes)) return notes;
     if (fullPreview) return fullPreview;
-    if (notes && notes.toLowerCase() !== 'str draft note') return notes;
+    if (notes && !isLowValueStrDraft(notes)) return notes;
     return fullPreview || notes || 'STR draft note';
   };
   const setOtcWordDraftBusy = (id: string, busy: boolean) =>
@@ -803,6 +819,10 @@ export default function CcoReview() {
                       if (!aid) return;
                       const v = (strDraftNotesById[aid] || '').trim();
                       if (!v) return;
+                      if (isStrScaffoldDraft(v) || isLowValueStrDraft(v)) {
+                        setStrDraftModalError('This draft text is still placeholder content. Click "Refresh preview", then edit and save real report text.');
+                        return;
+                      }
                       setStrDraftSaveBusyById((prev) => ({ ...prev, [aid]: true }));
                       try {
                         await reportsApi.saveSTRDraft(aid, { str_notes: v });
@@ -842,6 +862,29 @@ export default function CcoReview() {
                     className="px-3 py-1.5 text-xs rounded bg-slate-700 text-white disabled:opacity-50"
                   >
                     {strDraftDownloadBusyById[strDraftModalAlertId] ? 'Downloading…' : 'Download preview (.docx)'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!!strDraftBusyById[strDraftModalAlertId] || !!strDraftSaveBusyById[strDraftModalAlertId]}
+                    onClick={async () => {
+                      const aid = strDraftModalAlertId;
+                      if (!aid) return;
+                      setDraftBusy(aid, true);
+                      try {
+                        await reportsApi.deleteSTRDraft(aid);
+                        const res = await reportsApi.getSTRDraftPreview(aid);
+                        setStrDraftNotesById((prev) => ({ ...prev, [aid]: editorTextFromPreview(res) }));
+                        setStrPreviewById((prev) => ({ ...prev, [aid]: res.word_preview_lines || [] }));
+                        setStrDraftModalError(null);
+                      } catch (e) {
+                        setStrDraftModalError(e instanceof Error ? e.message : 'Could not reset saved draft.');
+                      } finally {
+                        setDraftBusy(aid, false);
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-amber-600 text-white disabled:opacity-50"
+                  >
+                    Reset saved draft
                   </button>
                   <button
                     type="button"
