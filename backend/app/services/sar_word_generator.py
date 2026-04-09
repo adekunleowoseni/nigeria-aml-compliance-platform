@@ -123,6 +123,24 @@ def _us_nexus_clause(us_focus: bool) -> str:
     )
 
 
+def _bvn_other_accounts_text(ctx: Dict[str, Any]) -> str:
+    cust = ctx.get("customer") if isinstance(ctx.get("customer"), dict) else {}
+    primary_acct = str(cust.get("account_number") or "").strip()
+    linked = ctx.get("bvn_linked_accounts") if isinstance(ctx.get("bvn_linked_accounts"), list) else []
+    accounts: list[str] = []
+    for row in linked:
+        if not isinstance(row, dict):
+            continue
+        acct = str(row.get("account_number") or "").strip()
+        if acct:
+            accounts.append(acct)
+    uniq = sorted(set(accounts))
+    other = [a for a in uniq if a != primary_acct]
+    if not other:
+        return "No other accounts linked to this BVN were identified in the Bank's records."
+    return ", ".join(other)
+
+
 def _fallback_sections(ctx: Dict[str, Any]) -> Dict[str, str]:
     cust = ctx.get("customer") or {}
     txn = ctx.get("transaction") or {}
@@ -156,7 +174,7 @@ def _fallback_sections(ctx: Dict[str, Any]) -> Dict[str, str]:
             "bvn_internal_linkage": (
                 f"The subject's BVN ({bvn}) maps to account {acct} within the institution. Occupation on file: {occ}."
             ),
-            "bvn_other_accounts": "No additional accounts linked to this BVN were identified in the bank's core snapshot (demo).",
+            "bvn_other_accounts": _bvn_other_accounts_text(ctx),
             "bvn_volume_comparison": (
                 f"Recent referenced activity includes {amt_s} with narrative context from monitoring; compare to historical low-value profile where applicable."
             ),
@@ -191,7 +209,7 @@ def _fallback_sections(ctx: Dict[str, Any]) -> Dict[str, str]:
                 + "Activity narrative emphasises scenario / typology rather than a single ledger row (demo)."
             ).strip(),
             "bvn_internal_linkage": f"BVN ({bvn}) maps to account {acct}; relationship view emphasises behavioural signals over a single posting.",
-            "bvn_other_accounts": "Additional linked accounts: none identified in the demo linkage snapshot.",
+            "bvn_other_accounts": _bvn_other_accounts_text(ctx),
             "bvn_volume_comparison": (
                 f"Referenced anchor amount {amt_s} (illustrative); SAR focuses on broader activity described in monitoring output."
                 if amt
@@ -227,7 +245,7 @@ def _fallback_sections(ctx: Dict[str, Any]) -> Dict[str, str]:
         "secondary_suspicion": "Deviation from historical customer behaviour and lack of clear economic purpose for the observed flow.",
         "activity_typology": f"Aligned with alert summary — {summ[:220]}.",
         "bvn_internal_linkage": f"The subject's BVN ({bvn}) is linked to account {acct} within the institution.",
-        "bvn_other_accounts": "No other accounts linked to this BVN were identified in the Bank's database (demo).",
+        "bvn_other_accounts": _bvn_other_accounts_text(ctx),
         "bvn_volume_comparison": (
             f"Recent activity ({amt_s}) represents a material step-change relative to prior lower-value activity on file."
         ),
@@ -265,6 +283,8 @@ async def generate_sar_narrative_sections(case_context: Dict[str, Any]) -> tuple
         res = await client.generate(prompt, system=_LLM_SYSTEM, temperature=0.5)
         parsed = _parse_llm_sections(res.content)
         if parsed:
+            # Keep BVN-linked account numbers deterministic from snapshot context.
+            parsed["bvn_other_accounts"] = _bvn_other_accounts_text(case_context)
             return parsed, "llm"
         log.warning("sar_llm_json_parse_failed")
     except Exception as exc:
@@ -465,6 +485,9 @@ def build_sar_case_context(
                 "narrative": tx.get("narrative"),
                 "amount": tx.get("amount"),
             }
+        bvn_linked = enrichment.get("bvn_linked_accounts")
+        if isinstance(bvn_linked, list):
+            ctx["bvn_linked_accounts"] = bvn_linked
     return ctx
 
 

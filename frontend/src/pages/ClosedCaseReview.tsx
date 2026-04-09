@@ -301,7 +301,8 @@ export default function ClosedCaseReview() {
                         <span className="text-slate-500">ID:</span> {selected.alert.id}
                       </div>
                       <div>
-                        <span className="text-slate-500">Customer:</span> {selected.alert.customer_id}
+                        <span className="text-slate-500">Customer:</span>{' '}
+                        {String(selected.alert.customer_name || '').trim() || selected.alert.customer_id}
                       </div>
                       <div>
                         <span className="text-slate-500">Severity:</span> {selected.alert.severity}

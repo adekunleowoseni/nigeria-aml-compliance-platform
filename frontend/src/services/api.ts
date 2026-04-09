@@ -163,6 +163,11 @@ export const aiApi = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  refineReport: (body: { draft_text: string; instruction?: string; alert_id?: string }) =>
+    request<{ provider: string; model: string; refined_text: string }>('/ai/refine-report', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 };
 
 function auditQueryString(params: Record<string, string | number | undefined | null | boolean>) {
@@ -419,9 +424,23 @@ export type RedFlagRuleRow = {
   updated_at?: string;
 };
 
+export type DetectionRuleCatalogItem = {
+  rule_id: string;
+  title: string;
+  description: string;
+  parameters?: Record<string, unknown>;
+};
+
 /** Admin: configurable AML red-flag library (pattern-matched on ingest + snapshots). */
 export const adminRedFlagsApi = {
   listRules: () => request<{ items: RedFlagRuleRow[] }>('/admin/red-flags/rules'),
+  ruleCatalog: () =>
+    request<{
+      red_flag_rules: RedFlagRuleRow[];
+      typology_rules: DetectionRuleCatalogItem[];
+      anomaly_rules: DetectionRuleCatalogItem[];
+      pattern_sources: Array<{ source: string; description: string }>;
+    }>('/admin/red-flags/rule-catalog'),
   upsertRule: (body: {
     rule_code: string;
     title: string;
@@ -546,6 +565,27 @@ export type CustomerKycDto = {
   id_number: string;
 };
 
+export type CustomerRiskReview = {
+  review_id: string;
+  customer_id: string;
+  reviewed_at: string;
+  risk_rating: 'high' | 'medium' | 'low';
+  previous_risk_rating?: string | null;
+  next_review_due_at: string;
+  suggested_risk_profile?: 'high' | 'medium' | 'low';
+  recommendation?: string;
+  status?: string;
+  pep_flag?: boolean;
+  profile_changed?: boolean;
+  account_update_within_period?: boolean;
+  management_approval_within_period?: boolean;
+  age_commensurate?: boolean;
+  activity_commensurate?: boolean;
+  expected_turnover_match?: boolean;
+  expected_lodgement_match?: boolean;
+  expected_activity_match?: boolean;
+};
+
 /** Backend: aop_package | profile_change | cash_threshold */
 export type CustomerUploadDocumentKind = 'aop_package' | 'profile_change' | 'cash_threshold';
 
@@ -572,6 +612,12 @@ export const customersApi = {
         customer_name: string;
         account_number: string;
         account_opened: string;
+        line_of_business?: string | null;
+        contact_email?: string | null;
+        account_holder_type?: 'individual' | 'corporate' | string;
+        account_product?: 'savings' | 'current' | string;
+        ledger_code?: string | null;
+        account_reference?: string | null;
         id_number?: string;
         updated_at?: string | null;
         aop_on_file?: boolean;
@@ -579,6 +625,12 @@ export const customersApi = {
         /** Present when at least one AOP upload exists — use with downloadAopUpload. */
         primary_aop_upload_id?: string;
         primary_aop_filename?: string;
+        risk_rating?: 'high' | 'medium' | 'low';
+        last_review_date?: string | null;
+        next_review_due_at?: string | null;
+        review_status?: 'due' | 'reviewed' | 'pending';
+        needs_profile_update?: boolean;
+        review_recommendations?: string[];
       }>;
       total: number;
       page: number;
@@ -605,7 +657,114 @@ export const customersApi = {
       customer_id: string;
       kyc: CustomerKycDto;
       aop_uploads?: CustomerAopUploadMeta[];
+      risk_reviews?: CustomerRiskReview[];
+      account_profile?: {
+        customer_name?: string;
+        account_holder_type?: string;
+        account_product?: string;
+        ledger_code?: string;
+        account_reference?: string | null;
+        line_of_business?: string;
+      };
+      linked_companies?: Array<{
+        company_customer_id: string;
+        company_name: string;
+        company_account_number: string;
+        relationship_role: string;
+      }>;
     }>(`/customers/${encodeURIComponent(customerId)}`),
+  submitRiskReview: (
+    customerId: string,
+    body: {
+      last_review_date: string;
+      risk_rating: 'high' | 'medium' | 'low';
+      id_card_expiry_date?: string | null;
+      expected_turnover_match: boolean;
+      expected_lodgement_match: boolean;
+      expected_activity_match: boolean;
+      pep_flag: boolean;
+      account_update_within_period: boolean;
+      management_approval_within_period: boolean;
+      profile_changed: boolean;
+      age_commensurate: boolean;
+      activity_commensurate: boolean;
+      recommendation?: string;
+      send_edd_request?: boolean;
+      checklist?: Record<string, unknown>;
+    }
+  ) =>
+    request<{ customer_id: string; review: CustomerRiskReview }>(
+      `/customers/${encodeURIComponent(customerId)}/risk-review`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  listDueRiskReviews: (params?: { days_ahead?: number; limit?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.days_ahead != null) sp.set('days_ahead', String(params.days_ahead));
+    if (params?.limit != null) sp.set('limit', String(params.limit));
+    const qs = sp.toString();
+    return request<{ items: Array<Record<string, unknown>>; as_of: string; days_ahead: number }>(
+      `/customers/risk-reviews/due${qs ? `?${qs}` : ''}`
+    );
+  },
+  sendDueRiskReviewAlerts: (body: {
+    customer_ids?: string[];
+    cco_email?: string;
+    relationship_manager_email?: string;
+    mode?: 'individual' | 'bulk';
+  }) =>
+    request<{
+      status: string;
+      sent: Array<{ customer_id: string; recipient_email: string; recipient_role: string; log_id: string }>;
+      failures: Array<{ customer_id: string; recipient_email: string; error: string }>;
+    }>('/customers/risk-reviews/alerts/send', { method: 'POST', body: JSON.stringify(body) }),
+  getReviewRules: () =>
+    request<{
+      rules: {
+        high_months: number;
+        medium_months: number;
+        low_months: number;
+        student_monthly_turnover_recommend_corporate_ngn: number;
+        id_expiry_warning_days: number;
+        require_additional_docs_when_monthly_turnover_above_ngn: number;
+      };
+    }>('/customers/admin/review-rules'),
+  putReviewRules: (body: {
+    high_months: number;
+    medium_months: number;
+    low_months: number;
+    student_monthly_turnover_recommend_corporate_ngn: number;
+    id_expiry_warning_days: number;
+    require_additional_docs_when_monthly_turnover_above_ngn: number;
+  }) =>
+    request<{
+      status: string;
+      rules: {
+        high_months: number;
+        medium_months: number;
+        low_months: number;
+        student_monthly_turnover_recommend_corporate_ngn: number;
+        id_expiry_warning_days: number;
+        require_additional_docs_when_monthly_turnover_above_ngn: number;
+      };
+    }>('/customers/admin/review-rules', { method: 'PUT', body: JSON.stringify(body) }),
+  relatedAccounts: (customerId: string) =>
+    request<{
+      primary_customer_id: string;
+      customer_name: string;
+      total_accounts: number;
+      other_accounts: number;
+      items: Array<{
+        customer_id: string;
+        customer_name: string;
+        account_number: string;
+        id_number?: string | null;
+        updated_at?: string | null;
+        account_holder_type?: 'individual' | 'corporate' | string;
+        account_product?: 'savings' | 'current' | string;
+        ledger_code?: string | null;
+        account_reference?: string | null;
+      }>;
+    }>(`/customers/${encodeURIComponent(customerId)}/related-accounts`),
   patch: (customerId: string, body: Partial<CustomerKycDto>) =>
     request<{ customer_id: string; kyc: CustomerKycDto }>(`/customers/${encodeURIComponent(customerId)}`, {
       method: 'PATCH',
@@ -646,6 +805,22 @@ export const customersApi = {
     const disposition = res.headers.get('Content-Disposition');
     const filename =
       disposition?.match(/filename="?([^";]+)"?/)?.[1] || fallbackFilename;
+    downloadBlob(blob, filename);
+  },
+  async downloadCustomerStatement(customerId: string, params?: { period_start?: string; period_end?: string }) {
+    const q = new URLSearchParams();
+    if (params?.period_start) q.set('period_start', params.period_start);
+    if (params?.period_end) q.set('period_end', params.period_end);
+    const qs = q.toString();
+    const url = `${BASE.replace(/\/$/, '')}/customers/${encodeURIComponent(customerId)}/statement/download${qs ? `?${qs}` : ''}`;
+    const token = getBearerToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(await parseErrorMessage(res));
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition');
+    const filename = disposition?.match(/filename="?([^";]+)"?/)?.[1] || `SOA_${customerId}.docx`;
     downloadBlob(blob, filename);
   },
   /**
@@ -699,6 +874,7 @@ export type Alert = {
   id: string;
   transaction_id: string;
   customer_id: string;
+  customer_name?: string | null;
   severity: number;
   status: string;
   rule_ids?: string[];
@@ -721,7 +897,29 @@ export type Alert = {
   cco_estr_word_approved?: boolean;
   otc_submitted_at?: string | null;
   linked_transaction_type?: string | null;
+  linked_channel?: string | null;
   walk_in_otc?: boolean;
+  primary_account_number?: string | null;
+  linked_accounts_count?: number;
+  linked_accounts?: Array<{
+    customer_id?: string;
+    customer_name?: string | null;
+    account_number?: string | null;
+    bvn?: string | null;
+  }>;
+  related_transactions?: Array<{
+    transaction_id?: string;
+    customer_id?: string;
+    transaction_type?: string;
+    amount?: number;
+    currency?: string;
+    from_account?: string | null;
+    to_account?: string | null;
+    narrative?: string | null;
+    channel?: string | null;
+    created_at?: string | null;
+    seeded_by_alert?: boolean;
+  }>;
   investigation_history?: Array<Record<string, unknown>>;
   created_at: string;
   updated_at?: string;
@@ -786,7 +984,7 @@ export const alertsApi = {
     severity?: string;
     sort?: 'risk' | 'newest';
     /** Cash / walk-in OTC and alerts already in OTC workflow */
-    queue?: 'otc_estr';
+    queue?: 'core' | 'otc_estr' | 'otc_esar';
   }) => {
     const skip = params.skip ?? 0;
     const limit = params.limit ?? 20;
@@ -804,7 +1002,7 @@ export const alertsApi = {
     status?: string;
     severity?: string;
     sort?: 'risk' | 'newest';
-    queue?: 'otc_estr';
+    queue?: 'core' | 'otc_estr' | 'otc_esar';
   }) => {
     const skip = params.skip ?? 0;
     const limit = params.limit ?? 20;
@@ -943,6 +1141,8 @@ export const alertsApi = {
       cco_otc_approved: boolean;
       otc_report_kind: string | null;
       cco_estr_word_approved?: boolean;
+      estr_draft_report_id?: string | null;
+      otc_draft_report_id?: string | null;
       action_key: string;
     }>(`/alerts/${encodeURIComponent(alertId)}/cco-approve-otc`, {
       method: 'POST',
@@ -1062,6 +1262,7 @@ export const reportsApi = {
     generate_statement_of_account?: boolean;
     statement_period_start?: string;
     statement_period_end?: string;
+    use_saved_draft?: boolean;
   }) =>
     request<{
       report_id: string;
@@ -1086,6 +1287,7 @@ export const reportsApi = {
     generate_statement_of_account?: boolean;
     statement_period_start?: string;
     statement_period_end?: string;
+    use_saved_draft?: boolean;
   }) =>
     request<{
       results: Array<
@@ -1106,6 +1308,68 @@ export const reportsApi = {
       generated: number;
       requested: number;
     }>('/reports/str/generate-bulk', { method: 'POST', body: JSON.stringify(body) }),
+  getSTRDraftPreview: (alertId: string) =>
+    request<{
+      alert_id: string;
+      str_notes: string;
+      has_saved_draft: boolean;
+      word_preview_lines: string[];
+    }>(`/reports/str/draft/${encodeURIComponent(alertId)}`),
+  saveSTRDraft: (alertId: string, body: { str_notes: string }) =>
+    request<{ status: string; alert_id: string; str_notes: string }>(
+      `/reports/str/draft/${encodeURIComponent(alertId)}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  strDraftStatusBulk: (alertIds: string[]) =>
+    request<{ items: Record<string, boolean> }>('/reports/str/draft/status', {
+      method: 'POST',
+      body: JSON.stringify({ alert_ids: alertIds }),
+    }),
+  getOtcWordDraftPreview: (alertId: string) =>
+    request<{
+      alert_id: string;
+      estr_notes: string;
+      has_saved_draft: boolean;
+      otc_report_kind?: string | null;
+      word_preview_lines: string[];
+      preview_warning?: string;
+    }>(`/reports/otc-word/draft/${encodeURIComponent(alertId)}`),
+  saveOtcWordDraft: (alertId: string, body: { estr_notes: string }) =>
+    request<{ status: string; alert_id: string; estr_notes: string }>(
+      `/reports/otc-word/draft/${encodeURIComponent(alertId)}`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  otcWordDraftStatusBulk: (alertIds: string[]) =>
+    request<{ items: Record<string, boolean> }>('/reports/otc-word/draft/status', {
+      method: 'POST',
+      body: JSON.stringify({ alert_ids: alertIds }),
+    }),
+  async downloadOtcWordDraftPreview(alertId: string) {
+    const url = `${BASE.replace(/\/$/, '')}/reports/otc-word/draft/${encodeURIComponent(alertId)}/download`;
+    const token = getBearerToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(res.statusText);
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition');
+    const filename =
+      disposition?.match(/filename="?([^";]+)"?/)?.[1] || `OTC-Word-Draft-${alertId.slice(0, 8)}.docx`;
+    downloadBlob(blob, filename);
+  },
+  async downloadSTRDraftPreview(alertId: string) {
+    const url = `${BASE.replace(/\/$/, '')}/reports/str/draft/${encodeURIComponent(alertId)}/download`;
+    const token = getBearerToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(res.statusText);
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition');
+    const filename =
+      disposition?.match(/filename="?([^";]+)"?/)?.[1] || `STR-Draft-Preview-${alertId.slice(0, 8)}.docx`;
+    downloadBlob(blob, filename);
+  },
   generateCTR: (body: { transaction_ids?: string[]; customer_id?: string }) =>
     request<{ report_id: string; xml_preview?: string | null; validation_passed: boolean }>('/reports/ctr/generate', {
       method: 'POST',
@@ -1143,6 +1407,7 @@ export const reportsApi = {
     transaction_id?: string;
     sar_notes?: string;
     notes?: string;
+    use_saved_draft?: boolean;
     /** When true, narrative may reference US-person / USD nexus when plausible (demo). Default off if omitted. */
     us_activity?: boolean;
   }) =>
@@ -1162,6 +1427,8 @@ export const reportsApi = {
       items: Array<{
         alert_id: string;
         customer_id: string;
+        customer_name?: string | null;
+        linked_channel?: string | null;
         transaction_id: string;
         summary?: string | null;
         severity: number;
@@ -1175,6 +1442,8 @@ export const reportsApi = {
       items: Array<{
         alert_id: string;
         customer_id: string;
+        customer_name?: string | null;
+        linked_channel?: string | null;
         transaction_id: string;
         summary?: string | null;
         otc_subject?: string | null;
@@ -1191,6 +1460,7 @@ export const reportsApi = {
     limit?: number;
     sar_notes?: string;
     notes?: string;
+    use_saved_draft?: boolean;
     /** Default off if omitted. */
     us_activity?: boolean;
   }) =>
@@ -1215,12 +1485,18 @@ export const reportsApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  generateESTR: (body: { alert_id?: string; estr_notes?: string; notes?: string }) =>
+  generateESTR: (body: { alert_id?: string; estr_notes?: string; notes?: string; use_saved_draft?: boolean }) =>
     request<{ report_id: string; xml_preview: string | null; validation_passed: boolean }>('/reports/estr/generate', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  generateESTRBulk: (body: { alert_ids?: string[]; limit?: number; estr_notes?: string; notes?: string }) =>
+  generateESTRBulk: (body: {
+    alert_ids?: string[];
+    limit?: number;
+    estr_notes?: string;
+    notes?: string;
+    use_saved_draft?: boolean;
+  }) =>
     request<{
       results: Array<
         | {
@@ -1353,6 +1629,26 @@ export type LeaRequestRecord = {
   aop_report_id?: string | null;
   sent_at?: string | null;
   transaction_rows_sent?: number;
+  email_subject_override?: string;
+  email_body_override?: string;
+};
+
+export type LeaPreview = {
+  customer_id: string;
+  customer_name?: string | null;
+  account_number?: string | null;
+  recipient_email: string;
+  period_start: string;
+  period_end: string;
+  account_opened_kyc?: string;
+  include_aop: boolean;
+  aop_on_file?: boolean;
+  statement_generated: boolean;
+  statement_rows: number;
+  attachments: Array<{ name: string; kind: string; generated: boolean; rows?: number; on_file?: boolean }>;
+  email_subject: string;
+  email_body: string;
+  internal_notes?: string;
 };
 
 export const leaApi = {
@@ -1367,9 +1663,24 @@ export const leaApi = {
     workstation_mac?: string;
     internal_notes?: string;
     client_public_ip?: string;
+    email_subject_override?: string;
+    email_body_override?: string;
     submit_for_cco?: boolean;
   }) =>
     request<LeaRequestRecord>('/lea/requests', { method: 'POST', body: JSON.stringify(body) }),
+  preview: (body: {
+    customer_id: string;
+    agency: string;
+    recipient_email: string;
+    period_start?: string;
+    period_end?: string;
+    include_aop?: boolean;
+    workstation_mac?: string;
+    internal_notes?: string;
+    client_public_ip?: string;
+    email_subject_override?: string;
+    email_body_override?: string;
+  }) => request<LeaPreview>('/lea/preview', { method: 'POST', body: JSON.stringify(body) }),
   getRequest: (id: string) => request<LeaRequestRecord>(`/lea/requests/${encodeURIComponent(id)}`),
   pendingCco: () => request<{ items: LeaRequestRecord[] }>('/lea/requests/pending-cco'),
   notifyCco: (id: string) =>
@@ -1379,8 +1690,11 @@ export const leaApi = {
       method: 'POST',
       body: JSON.stringify(body ?? {}),
     }),
-  sendPackage: (id: string) =>
-    request<LeaRequestRecord>(`/lea/requests/${encodeURIComponent(id)}/send`, { method: 'POST' }),
+  sendPackage: (id: string, body?: { email_subject_override?: string; email_body_override?: string }) =>
+    request<LeaRequestRecord>(`/lea/requests/${encodeURIComponent(id)}/send`, {
+      method: 'POST',
+      body: JSON.stringify(body ?? {}),
+    }),
 };
 
 async function downloadRegulatoryFile(path: string, reportId: string, format: 'word' | 'xml' | 'pdf') {
@@ -1428,6 +1742,38 @@ export type OtcBranchSeedResult = {
   cco_pre_approved: boolean;
   note?: string;
   replaced?: boolean;
+};
+
+export type StatementBulkSeedResult = {
+  routine_transactions: number;
+  suspicious_outflow_transactions: number;
+  scenario_customers: string[];
+  total_customers_in_pool: number;
+  transaction_ids: string[];
+  seed: number;
+  seeded_transactions: number;
+  in_memory_transaction_count?: number;
+};
+
+export type MissingAopSeedResult = {
+  applied: number;
+  skipped: boolean;
+  template?: string;
+  persisted_to_database?: boolean;
+  reason?: string;
+};
+
+export type MassCustomerSeedResult = {
+  seeded_customers: number;
+  customer_ids: string[];
+  risky_customer_ids: string[];
+  suspicious_transactions: number;
+  total_transactions: number;
+  transaction_ids: string[];
+  seed: number;
+  aop_template_seed?: MissingAopSeedResult;
+  in_memory_transaction_count?: number;
+  alerts_count?: number;
 };
 
 export const demoApi = {
@@ -1484,6 +1830,43 @@ export const demoApi = {
       }),
     }),
   /**
+   * Add statement-heavy records across all demo customers:
+   * NIBSS/NIP, card, POS, USSD, ATM + suspicious outflow dissipation chains for scenario customers.
+   */
+  seedStatementBulk: (body?: {
+    routine_count?: number;
+    suspicious_outflows_per_scenario?: number;
+    seed?: number;
+  }) =>
+    request<StatementBulkSeedResult>('/demo/seed-statement-bulk', {
+      method: 'POST',
+      body: JSON.stringify({
+        routine_count: 1550,
+        suspicious_outflows_per_scenario: 20,
+        seed: 77,
+        ...body,
+      }),
+    }),
+  /** Attach AOP template to customers that currently have no AOP file. */
+  seedMissingAop: () => request<MissingAopSeedResult>('/demo/seed-missing-aop', { method: 'POST', body: '{}' }),
+  /** Large synthetic load: many random customers + mixed rails + suspicious high-risk scenarios. */
+  seedMassCustomers: (body?: {
+    customer_count?: number;
+    risky_customer_count?: number;
+    suspicious_per_risky_customer?: number;
+    seed?: number;
+  }) =>
+    request<MassCustomerSeedResult>('/demo/seed-mass-customers', {
+      method: 'POST',
+      body: JSON.stringify({
+        customer_count: 1234,
+        risky_customer_count: 104,
+        suspicious_per_risky_customer: 500,
+        seed: 20260407,
+        ...body,
+      }),
+    }),
+  /**
    * One click: clear stores once, then standard AML + showcase + OTC table + AOP templates + 10-year temporal
    * synthetic history (appended). May take 1–2 minutes.
    */
@@ -1493,6 +1876,9 @@ export const demoApi = {
       standard: { seeded_transactions: number; transaction_ids: string[]; replaced?: boolean };
       showcase: ShowcaseSeedResult;
       otc_branch: OtcBranchSeedResult;
+      statement_bulk?: StatementBulkSeedResult;
+      missing_aop_seed?: MissingAopSeedResult;
+      mass_customer_seed?: MassCustomerSeedResult;
       aop_template_seed?: Record<string, unknown>;
       temporal_simulation?: TemporalSimulationResult;
       seeded_transactions_total: number;

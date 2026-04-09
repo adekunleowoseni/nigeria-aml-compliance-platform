@@ -17,6 +17,15 @@ class LlmSettingsBody(BaseModel):
     provider: Literal["gemini", "openai", "ollama"] = Field(..., description="Selected AI provider")
 
 
+class RefineReportBody(BaseModel):
+    draft_text: str = Field(..., min_length=1, description="Draft narrative text to refine.")
+    instruction: Optional[str] = Field(
+        default=None,
+        description="Optional instruction for style/tone/output constraints.",
+    )
+    alert_id: Optional[str] = None
+
+
 def _require_admin(user: Dict[str, Any]) -> None:
     if (user.get("role") or "").lower() != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -94,4 +103,39 @@ async def decision_support(
     llm = get_llm_client()
     result = await llm.generate(prompt)
     return {"provider": result.provider, "model": result.model, "summary": result.content, "raw": result.raw}
+
+
+@router.post("/refine-report")
+async def refine_report(
+    body: RefineReportBody,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    instruction = (body.instruction or "").strip() or (
+        "Refine this STR report narrative for clarity, regulatory tone, and readability. "
+        "Keep all factual details accurate and do not invent any data."
+    )
+    prompt = (
+        "You are an AML compliance reporting assistant.\n\n"
+        "Task:\n"
+        f"{instruction}\n\n"
+        "Rules:\n"
+        "- Keep all facts, names, dates, amounts, and identifiers unchanged unless grammar fixes are required.\n"
+        "- Do not invent details.\n"
+        "- Return only the refined report text (no headings, no explanations).\n\n"
+        "Draft text:\n"
+        f"{body.draft_text.strip()}\n"
+    )
+    llm = get_llm_client()
+    result = await llm.generate(prompt)
+    out = (result.content or "").strip()
+    if not out:
+        raise HTTPException(status_code=502, detail="AI returned an empty response for report refinement.")
+    audit_trail.record_event_from_user(
+        user,
+        action="ai.refine_report",
+        resource_type="alert" if body.alert_id else "document",
+        resource_id=(body.alert_id or "str_draft"),
+        details={"provider": result.provider, "model": result.model, "input_chars": len(body.draft_text)},
+    )
+    return {"provider": result.provider, "model": result.model, "refined_text": out}
 

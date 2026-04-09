@@ -1,28 +1,158 @@
 [
   {
-    "pep_id": "PEP-882-NG",
-    "name": "Senator Musa Abubakar",
-    "role": "Chairman, Senate Committee on Finance",
+    "pep_id": "PEP-001-NG",
+    "name": "Adaeze Lawal",
+    "role": "Minister of Finance",
     "country": "Nigeria",
     "pep_level": "Level 1 (National Government)",
     "associates": [
-      { "name": "Fatima Abubakar", "relationship": "Spouse" },
-      { "name": "Aminu Musa", "relationship": "Child" }
+      { "name": "Chidi Lawal", "relationship": "Spouse" },
+      { "name": "Kelechi Lawal", "relationship": "Child" }
     ],
-    "source_of_wealth": "State Salary, Real Estate Holdings",
+    "source_of_wealth": "Ministerial Salary, Investment Holdings",
     "risk_rating": "High"
   },
   {
-    "pep_id": "PEP-905-NG",
-    "name": "Major General Chidi Okoro",
-    "role": "Chief of Logistics, Nigerian Army",
+    "pep_id": "PEP-002-NG",
+    "name": "Adaobi Abubakar",
+    "role": "Deputy Governor, Central Bank of Nigeria",
     "country": "Nigeria",
-    "pep_level": "Level 2 (Senior Military)",
+    "pep_level": "Level 1 (National Government)",
     "associates": [
-      { "name": "Nneka Okoro", "relationship": "Spouse" },
-      { "name": "Okoro & Sons Logistics", "relationship": "Related Business Entity" }
+      { "name": "Usman Abubakar", "relationship": "Spouse" },
+      { "name": "Zainab Abubakar", "relationship": "Child" }
     ],
-    "source_of_wealth": "Government Remuneration, Defense Contracts",
+    "source_of_wealth": "Central Bank Remuneration, Consultancy Fees",
+    "risk_rating": "Medium"
+  },
+  {
+    "pep_id": "PEP-003-NG",
+    "name": "Adaobi Adeyemi",
+    "role": "Chairperson, House Committee on Petroleum",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Oluwaseun Adeyemi", "relationship": "Spouse" },
+      { "name": "Adeyemi Energy Ltd", "relationship": "Related Business Entity" }
+    ],
+    "source_of_wealth": "Legislative Salary, Oil & Gas Interests",
+    "risk_rating": "High"
+  },
+  {
+    "pep_id": "PEP-004-NG",
+    "name": "Adaobi Afolabi",
+    "role": "Director General, National Intelligence Agency",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Tunde Afolabi", "relationship": "Spouse" },
+      { "name": "Folake Afolabi", "relationship": "Child" }
+    ],
+    "source_of_wealth": "Government Salary, Classified Assets",
+    "risk_rating": "High"
+  },
+  {
+    "pep_id": "PEP-005-NG",
+    "name": "Adaobi Ahmed",
+    "role": "Governor, Kwara State",
+    "country": "Nigeria",
+    "pep_level": "Level 2 (Regional/State Government)",
+    "associates": [
+      { "name": "Ibrahim Ahmed", "relationship": "Spouse" },
+      { "name": "Aisha Ahmed", "relationship": "Child" }
+    ],
+    "source_of_wealth": "Gubernatorial Salary, Agricultural Holdings",
+    "risk_rating": "Medium"
+  },
+  {
+    "pep_id": "PEP-006-NG",
+    "name": "Adaobi Bakare",
+    "role": "Chief Judge, Federal High Court",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Olatunde Bakare", "relationship": "Spouse" },
+      { "name": "Bakare & Associates", "relationship": "Related Law Firm" }
+    ],
+    "source_of_wealth": "Judicial Salary, Real Estate Portfolio",
+    "risk_rating": "Low"
+  },
+  {
+    "pep_id": "PEP-007-NG",
+    "name": "Adaobi Balogun",
+    "role": "National Security Adviser",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Femi Balogun", "relationship": "Spouse" },
+      { "name": "Balogun Security Services", "relationship": "Related Business Entity" }
+    ],
+    "source_of_wealth": "Government Salary, Security Contracts",
+    "risk_rating": "High"
+  },
+  {
+    "pep_id": "PEP-008-NG",
+    "name": "Adaobi Bello",
+    "role": "Commissioner for Health, Lagos State",
+    "country": "Nigeria",
+    "pep_level": "Level 2 (Regional/State Government)",
+    "associates": [
+      { "name": "Segun Bello", "relationship": "Spouse" },
+      { "name": "Bello Medical Trust", "relationship": "Related Entity" }
+    ],
+    "source_of_wealth": "State Salary, Medical Consulting",
+    "risk_rating": "Medium"
+  },
+  {
+    "pep_id": "PEP-009-NG",
+    "name": "Adaobi Eze",
+    "role": "Managing Director, Nigerian Ports Authority",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Chukwuma Eze", "relationship": "Spouse" },
+      { "name": "Eze Logistics Group", "relationship": "Related Business Entity" }
+    ],
+    "source_of_wealth": "Executive Salary, Port-Related Investments",
+    "risk_rating": "High"
+  },
+  {
+    "pep_id": "PEP-010-NG",
+    "name": "Adaobi Ibrahim",
+    "role": "Senator representing Kaduna Central",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Yusuf Ibrahim", "relationship": "Spouse" },
+      { "name": "Fatima Ibrahim", "relationship": "Child" }
+    ],
+    "source_of_wealth": "Senatorial Salary, Construction Conglomerate",
+    "risk_rating": "High"
+  },
+  {
+    "pep_id": "PEP-011-NG",
+    "name": "Adaobi Lawal",
+    "role": "Ambassador to the United Nations",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Michael Lawal", "relationship": "Spouse" },
+      { "name": "Lawal Foundation", "relationship": "Related Entity" }
+    ],
+    "source_of_wealth": "Diplomatic Salary, International Investments",
+    "risk_rating": "Medium"
+  },
+  {
+    "pep_id": "PEP-012-NG",
+    "name": "Adaobi Nnamdi",
+    "role": "Chief of Army Staff",
+    "country": "Nigeria",
+    "pep_level": "Level 1 (National Government)",
+    "associates": [
+      { "name": "Ngozi Nnamdi", "relationship": "Spouse" },
+      { "name": "Nnamdi Defense Solutions", "relationship": "Related Business Entity" }
+    ],
+    "source_of_wealth": "Military Remuneration, Defense Industry Ties",
     "risk_rating": "High",
     "last_reviewed": "2024-01-20"
   }

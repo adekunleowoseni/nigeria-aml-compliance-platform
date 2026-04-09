@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from io import BytesIO
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -16,7 +17,7 @@ from app.core.security import get_current_user
 from app.models.alert import AlertResponse
 from app.models.transaction import TransactionResponse
 from app.services.alert_snapshot import build_alert_snapshot
-from app.services.customer_kyc_db import get_or_create_customer_kyc
+from app.services.customer_kyc_db import fetch_customer_kyc_any, get_or_create_customer_kyc, list_bvn_linked_accounts
 from app.services import audit_trail
 from app.services.compliance_bundle_narratives import build_aop_bundle_narrative, build_nfiu_cir_bundle_narrative
 from app.services.regulatory_reports import (
@@ -41,6 +42,16 @@ from app.services.sar_word_generator import (
 )
 from app.services.estr_word_generator import render_otc_estr_docx_bytes
 from app.services.str_word_generator import render_str_docx_bytes
+from docx import Document
+
+
+def _render_str_docx_bytes_safe(**kwargs: Any) -> bytes:
+    try:
+        return render_str_docx_bytes(**kwargs)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 from app.services.xml_generator import GoAMLGenerator
 from app.services.reporting_profile_db import get_reporting_profile_row, list_calendar_entries
 from app.services.reporting_context import (
@@ -52,6 +63,10 @@ from app.services.reporting_context import (
 router = APIRouter(prefix="/reports")
 
 _REPORTS: Dict[str, Dict[str, Any]] = {}
+_STR_DRAFT_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+_STR_DRAFT_MAX_CHARS = 32000
+_OTC_WORD_DRAFT_OVERRIDES: Dict[str, Dict[str, Any]] = {}
+_OTC_WORD_DRAFT_MAX_CHARS = 32000
 _generator = GoAMLGenerator()
 
 
@@ -85,6 +100,15 @@ def _latest_txn_for_customer(customer_id: str):
     if not txns:
         return None
     return max(txns, key=lambda t: t.created_at)
+
+
+def _linked_channel_for_alert(alert: AlertResponse) -> Optional[str]:
+    tx = _TXNS.get(alert.transaction_id)
+    if not tx:
+        return None
+    md = tx.metadata if isinstance(tx.metadata, dict) else {}
+    ch = str(md.get("channel") or "").strip().lower()
+    return ch or None
 
 
 def _alert_eligible_for_sar(alert: AlertResponse) -> bool:
@@ -231,15 +255,19 @@ def _txn_dict_for_estr_kyc(aid: Optional[str], cid: str) -> Dict[str, Any]:
     }
 
 
-def _estr_word_content_disposition_header(customer_name: str, report_id: str) -> str:
-    stem = (customer_name or "").strip() or f"ESTR_{report_id}"
-    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", stem)
-    stem = stem.strip() or f"ESTR_{report_id}"
+def _report_download_content_disposition(customer_name: str, label: str, ext: str) -> str:
+    base_name = (customer_name or "").strip() or "Customer"
+    base_name = re.sub(r"\s+", "_", base_name)
+    base_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", base_name).strip("-_")
+    if not base_name:
+        base_name = "Customer"
+    label_clean = re.sub(r"[\s\-]+", "_", str(label or "").strip()) or "REPORT"
+    stem = f"{label_clean}_{base_name}".strip("_")
     stem = stem[:200]
-    filename_utf8 = f"{stem}.docx"
+    filename_utf8 = f"{stem}.{ext}"
     ascii_stem = "".join((c if 32 <= ord(c) < 127 and c not in '<>:"/\\|?*' else "_") for c in stem)
     ascii_stem = re.sub(r"_+", "_", ascii_stem).strip("_") or "Customer"
-    ascii_name = f"{ascii_stem}.docx"
+    ascii_name = f"{ascii_stem}.{ext}"
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename_utf8)}"
 
 
@@ -290,6 +318,132 @@ def _extract_str_notes(payload: Dict[str, Any]) -> str:
         if isinstance(inner, str) and inner.strip():
             return inner.strip()
     return ""
+
+
+def _looks_like_str_editor_scaffold(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    # Legacy modal scaffold that should never be treated as an authored draft.
+    return (
+        "suspicious transaction report" in t
+        and "alert:" in t
+        and "narrative source:" in t
+        and "xml payload (excerpt)" in t
+    )
+
+
+def _extract_internal_narrative_from_scaffold(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    m = re.search(
+        r"internal narrative\s*(.*?)\s*xml payload \(excerpt\)",
+        raw,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not m:
+        return ""
+    out = re.sub(r"\s+\n", "\n", m.group(1)).strip()
+    return out
+
+
+def _looks_like_low_value_str_note(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    if t in {"str draft note", "suspicious transaction report"}:
+        return True
+    return len(t) <= 140 and "confirmed suspicious activity" in t and "true positive escalation" in t
+
+
+def get_saved_str_draft_notes(alert_id: str) -> str:
+    aid = (alert_id or "").strip()
+    if not aid:
+        return ""
+    d = _STR_DRAFT_OVERRIDES.get(aid) or {}
+    notes = str(d.get("str_notes") or "").strip()
+    if _looks_like_str_editor_scaffold(notes):
+        extracted = _extract_internal_narrative_from_scaffold(notes)
+        if _looks_like_low_value_str_note(extracted):
+            return ""
+        return extracted if extracted else ""
+    if _looks_like_low_value_str_note(notes):
+        return ""
+    return notes
+
+
+def get_saved_otc_word_draft_notes(alert_id: str) -> str:
+    aid = (alert_id or "").strip()
+    if not aid:
+        return ""
+    d = _OTC_WORD_DRAFT_OVERRIDES.get(aid) or {}
+    return str(d.get("estr_notes") or "").strip()
+
+
+def _alert_eligible_for_otc_word_draft_preview(alert: AlertResponse) -> bool:
+    """Escalated true-positive OTC (ESTR or ESAR) — same lifecycle stage as STR draft editing."""
+    if (alert.status or "").lower() != "escalated":
+        return False
+    if getattr(alert, "otc_outcome", None) != "true_positive":
+        return False
+    rk = getattr(alert, "otc_report_kind", None)
+    return rk in ("otc_estr", "otc_esar")
+
+
+def _default_otc_word_draft_notes(alert: AlertResponse) -> str:
+    saved = get_saved_otc_word_draft_notes(alert.id)
+    if saved:
+        return saved
+    rationale = str(getattr(alert, "otc_officer_rationale", None) or "").strip()
+    if rationale:
+        return rationale
+    return "OTC Word draft — add reasons for filing and any extension narrative for the regulator."
+
+
+async def _otc_word_draft_docx_bytes(
+    request: Request,
+    alert_id: str,
+    estr_notes: str,
+    user: Dict[str, Any],
+) -> bytes:
+    aid = (alert_id or "").strip()
+    alert = _ALERTS.get(aid)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    if not _alert_visible_to_user(user, alert):
+        raise HTTPException(status_code=403, detail="Alert outside your zone/branch scope.")
+    cid = str(alert.customer_id or "").strip() or "UNKNOWN"
+    txn_dict = _txn_dict_for_estr_kyc(aid, cid)
+    pg = getattr(request.app.state, "pg", None)
+    customer = await get_or_create_customer_kyc(pg, cid, txn_dict)
+    bvn_linked_accounts = await list_bvn_linked_accounts(
+        pg, str(customer.id_number or "").strip(), primary_customer_id=cid
+    )
+    alert_dict = alert.model_dump()
+    return await render_otc_estr_docx_bytes(
+        customer=customer,
+        alert=alert_dict,
+        estr_notes=estr_notes,
+        approver_name=_approver_display_name(user),
+        bvn_linked_accounts=bvn_linked_accounts,
+    )
+
+
+def _alert_eligible_for_str_draft_preview(alert: AlertResponse) -> bool:
+    """
+    Draft editing/preview is allowed both:
+    - before CCO approval (escalated queue), and
+    - after CCO approval (normal STR generation path),
+    excluding false-positive and OTC ESTR path.
+    """
+    if (alert.last_resolution or "").strip() == "false_positive":
+        return False
+    if (alert.status or "").lower() != "escalated":
+        return False
+    if getattr(alert, "otc_report_kind", None) == "otc_estr":
+        return False
+    return True
 
 
 def _normalize_txn_dict(txn_dict: Dict[str, Any], alert: AlertResponse) -> Dict[str, Any]:
@@ -440,17 +594,25 @@ async def _draft_str_report(
     user: Dict[str, Any],
     *,
     profile: Optional[Dict[str, Any]] = None,
+    allow_preapproval_preview: bool = False,
 ) -> Dict[str, Any]:
     alert = _ALERTS.get(alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="alert not found")
     prof = profile if profile is not None else await _load_report_profile(request)
-    if not _alert_eligible_for_str(alert):
-        raise HTTPException(
-            status_code=400,
-            detail="STR requires an escalated alert that the Chief Compliance Officer has approved for filing. "
-            "False-positive resolutions are not eligible.",
-        )
+    if allow_preapproval_preview:
+        if not _alert_eligible_for_str_draft_preview(alert):
+            raise HTTPException(
+                status_code=400,
+                detail="STR draft preview requires an escalated, non-false-positive alert in STR workflow.",
+            )
+    else:
+        if not _alert_eligible_for_str(alert):
+            raise HTTPException(
+                status_code=400,
+                detail="STR requires an escalated alert that the Chief Compliance Officer has approved for filing. "
+                "False-positive resolutions are not eligible.",
+            )
 
     txn = _TXNS.get(alert.transaction_id)
     txn_dict = (
@@ -685,6 +847,12 @@ async def generate_str(
         raise HTTPException(status_code=400, detail="alert_id is required")
 
     str_notes = _extract_str_notes(payload)
+    used_saved_draft = False
+    if bool(payload.get("use_saved_draft", True)):
+        draft_notes = get_saved_str_draft_notes(alert_id)
+        if draft_notes:
+            str_notes = draft_notes
+            used_saved_draft = True
     if not str_notes:
         raise HTTPException(status_code=400, detail="str_notes is required (compliance reason for this STR).")
 
@@ -723,7 +891,7 @@ async def generate_str(
                 "soa_period_start": soa_out["period_start"],
                 "soa_period_end": soa_out["period_end"],
             }
-    return out
+    return {**out, "used_saved_draft": used_saved_draft}
 
 
 @router.post("/str/generate-bulk")
@@ -780,12 +948,25 @@ async def generate_str_bulk(
             )
             continue
         try:
-            out = await _draft_str_report(request, aid, str_notes, user, profile=prof)
+            notes_eff = str_notes
+            used_saved_draft = False
+            if bool(payload.get("use_saved_draft", True)):
+                draft_notes = get_saved_str_draft_notes(aid)
+                if draft_notes:
+                    notes_eff = draft_notes
+                    used_saved_draft = True
+            out = await _draft_str_report(request, aid, notes_eff, user, profile=prof)
         except HTTPException as e:
             detail = e.detail if isinstance(e.detail, str) else str(e.detail)
             results.append({"alert_id": aid, "ok": False, "error": detail})
             continue
-        row: Dict[str, Any] = {"alert_id": aid, "customer_id": alert.customer_id, "ok": True, **out}
+        row: Dict[str, Any] = {
+            "alert_id": aid,
+            "customer_id": alert.customer_id,
+            "ok": True,
+            "used_saved_draft": used_saved_draft,
+            **out,
+        }
         if include_aop:
             aop_out = _draft_aop_record(
                 alert.customer_id,
@@ -824,6 +1005,309 @@ async def generate_str_bulk(
     return {"results": results, "generated": ok_n, "requested": len(ids_ordered)}
 
 
+@router.get("/str/draft/{alert_id}")
+async def get_str_draft_preview(
+    request: Request,
+    alert_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    aid = (alert_id or "").strip()
+    alert = _ALERTS.get(aid)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    if not _alert_visible_to_user(user, alert):
+        raise HTTPException(status_code=403, detail="Alert outside your zone/branch scope.")
+    saved_notes = get_saved_str_draft_notes(aid)
+    has_saved = bool(saved_notes)
+    notes = saved_notes or (alert.escalation_reason_notes or "").strip() or "STR draft note"
+    if not _alert_eligible_for_str_draft_preview(alert):
+        return {
+            "alert_id": aid,
+            "str_notes": notes,
+            "has_saved_draft": has_saved,
+            "word_preview_lines": [notes] if notes else [],
+            "preview_warning": "Alert is not currently eligible for STR draft preview generation.",
+        }
+    # If user saved free-form draft text, preview that exact text (WYSIWYG expectation).
+    if has_saved and notes:
+        lines = [p.strip() for p in re.split(r"\n\s*\n", notes) if p.strip()]
+        return {
+            "alert_id": aid,
+            "str_notes": notes,
+            "has_saved_draft": True,
+            "word_preview_lines": lines[:120] if lines else [notes],
+        }
+    lines: List[str] = []
+    try:
+        tmp = await _draft_str_report(request, aid, notes, user, allow_preapproval_preview=True)
+        rid = str(tmp["report_id"])
+        rec = _REPORTS.get(rid)
+        if rec:
+            pg = getattr(request.app.state, "pg", None)
+            docx = await str_docx_bytes_from_report_record(rec, pg=pg, user=user)
+            doc = Document(BytesIO(docx))
+            lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        _REPORTS.pop(rid, None)
+    except Exception:
+        lines = [notes] if notes else []
+    return {
+        "alert_id": aid,
+        "str_notes": notes,
+        "has_saved_draft": has_saved,
+        "word_preview_lines": lines[:60] if lines else ([notes] if notes else []),
+    }
+
+
+@router.get("/str/draft/{alert_id}/download")
+async def download_str_draft_preview(
+    request: Request,
+    alert_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    aid = (alert_id or "").strip()
+    alert = _ALERTS.get(aid)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    if not _alert_visible_to_user(user, alert):
+        raise HTTPException(status_code=403, detail="Alert outside your zone/branch scope.")
+    if not _alert_eligible_for_str_draft_preview(alert):
+        raise HTTPException(status_code=400, detail="alert is not eligible for STR draft preview")
+    saved_notes = get_saved_str_draft_notes(aid)
+    has_saved = bool(saved_notes)
+    notes = saved_notes or (alert.escalation_reason_notes or "").strip() or "STR draft note"
+    if has_saved and notes:
+        customer_name = str(getattr(alert, "customer_name", "") or "").strip() or "Customer"
+        docx = regulatory_narrative_docx_bytes(
+            title="Suspicious transaction report draft preview",
+            subtitle=f"Alert: {aid}",
+            narrative=notes,
+            xml_excerpt=None,
+            source_note="saved_draft_text",
+        )
+        return Response(
+            content=docx,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": _report_download_content_disposition(customer_name, "STR_DRAFT", "docx")},
+        )
+    tmp = await _draft_str_report(request, aid, notes, user, allow_preapproval_preview=True)
+    rid = str(tmp["report_id"])
+    rec = _REPORTS.get(rid)
+    if not rec:
+        raise HTTPException(status_code=500, detail="failed to prepare STR draft preview")
+    pg = getattr(request.app.state, "pg", None)
+    docx = await str_docx_bytes_from_report_record(rec, pg=pg, user=user)
+    _REPORTS.pop(rid, None)
+    customer_name = str(getattr(alert, "customer_name", "") or "").strip() or "Customer"
+    return Response(
+        content=docx,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": _report_download_content_disposition(customer_name, "STR_DRAFT", "docx")},
+    )
+
+
+@router.post("/str/draft/{alert_id}")
+async def save_str_draft(
+    alert_id: str,
+    payload: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    aid = (alert_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="alert_id is required")
+    if aid not in _ALERTS:
+        raise HTTPException(status_code=404, detail="alert not found")
+    alert = _ALERTS[aid]
+    if not _alert_eligible_for_str_draft_preview(alert):
+        raise HTTPException(status_code=400, detail="alert is not eligible for STR draft editing")
+    notes = str(payload.get("str_notes") or "").strip()
+    if not notes:
+        raise HTTPException(status_code=400, detail="str_notes is required")
+    if _looks_like_str_editor_scaffold(notes):
+        extracted = _extract_internal_narrative_from_scaffold(notes)
+        if extracted:
+            notes = extracted
+    saved_notes = notes[:_STR_DRAFT_MAX_CHARS]
+    _STR_DRAFT_OVERRIDES[aid] = {
+        "str_notes": saved_notes,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_by": str(user.get("email") or user.get("sub") or ""),
+    }
+    audit_trail.record_event_from_user(
+        user,
+        action="report.str_draft.saved",
+        resource_type="alert",
+        resource_id=aid,
+        details={"str_notes_length": len(saved_notes)},
+    )
+    return {"status": "ok", "alert_id": aid, "str_notes": saved_notes}
+
+
+@router.post("/str/draft/status")
+async def str_draft_status_bulk(
+    payload: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    raw = payload.get("alert_ids")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(status_code=400, detail="alert_ids must be a non-empty array")
+    out: Dict[str, bool] = {}
+    for x in raw[:500]:
+        aid = str(x or "").strip()
+        if not aid:
+            continue
+        a = _ALERTS.get(aid)
+        if not a:
+            continue
+        if not _alert_visible_to_user(user, a):
+            continue
+        out[aid] = bool(get_saved_str_draft_notes(aid))
+    return {"items": out}
+
+
+@router.get("/otc-word/draft/{alert_id}")
+async def get_otc_word_draft_preview(
+    request: Request,
+    alert_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    aid = (alert_id or "").strip()
+    alert = _ALERTS.get(aid)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    if not _alert_visible_to_user(user, alert):
+        raise HTTPException(status_code=403, detail="Alert outside your zone/branch scope.")
+    notes = _default_otc_word_draft_notes(alert)
+    has_saved = bool(get_saved_otc_word_draft_notes(aid))
+    if not _alert_eligible_for_otc_word_draft_preview(alert):
+        return {
+            "alert_id": aid,
+            "estr_notes": notes,
+            "has_saved_draft": has_saved,
+            "otc_report_kind": getattr(alert, "otc_report_kind", None),
+            "word_preview_lines": [notes] if notes else [],
+            "preview_warning": "Alert is not currently eligible for OTC Word draft preview (needs escalated true-positive OTC ESTR or ESAR).",
+        }
+    # Keep saved text and downloaded draft identical for user-edited OTC drafts.
+    if has_saved and notes:
+        lines = [p.strip() for p in re.split(r"\n\s*\n", notes) if p.strip()]
+        return {
+            "alert_id": aid,
+            "estr_notes": notes,
+            "has_saved_draft": True,
+            "otc_report_kind": getattr(alert, "otc_report_kind", None),
+            "word_preview_lines": lines[:120] if lines else [notes],
+        }
+    lines: List[str] = []
+    try:
+        docx = await _otc_word_draft_docx_bytes(request, aid, notes, user)
+        doc = Document(BytesIO(docx))
+        lines = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    except Exception:
+        lines = [notes] if notes else []
+    return {
+        "alert_id": aid,
+        "estr_notes": notes,
+        "has_saved_draft": has_saved,
+        "otc_report_kind": getattr(alert, "otc_report_kind", None),
+        "word_preview_lines": lines[:80] if lines else ([notes] if notes else []),
+    }
+
+
+@router.get("/otc-word/draft/{alert_id}/download")
+async def download_otc_word_draft_preview(
+    request: Request,
+    alert_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    aid = (alert_id or "").strip()
+    alert = _ALERTS.get(aid)
+    if not alert:
+        raise HTTPException(status_code=404, detail="alert not found")
+    if not _alert_visible_to_user(user, alert):
+        raise HTTPException(status_code=403, detail="Alert outside your zone/branch scope.")
+    if not _alert_eligible_for_otc_word_draft_preview(alert):
+        raise HTTPException(status_code=400, detail="alert is not eligible for OTC Word draft preview")
+    notes = _default_otc_word_draft_notes(alert)
+    has_saved = bool(get_saved_otc_word_draft_notes(aid))
+    rk = str(getattr(alert, "otc_report_kind", "") or "").strip().lower()
+    label = "OTC_ESAR_DRAFT" if rk == "otc_esar" else "OTC_ESTR_DRAFT"
+    customer_name = str(getattr(alert, "customer_name", "") or "").strip() or "Customer"
+    if has_saved and notes:
+        docx = regulatory_narrative_docx_bytes(
+            title="OTC report draft preview",
+            subtitle=f"{'OTC ESAR' if rk == 'otc_esar' else 'OTC ESTR'} · Alert: {aid}",
+            narrative=notes,
+            xml_excerpt=None,
+            source_note="saved_draft_text",
+        )
+        return Response(
+            content=docx,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": _report_download_content_disposition(customer_name, label, "docx")},
+        )
+    docx = await _otc_word_draft_docx_bytes(request, aid, notes, user)
+    return Response(
+        content=docx,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": _report_download_content_disposition(customer_name, label, "docx")},
+    )
+
+
+@router.post("/otc-word/draft/{alert_id}")
+async def save_otc_word_draft(
+    alert_id: str,
+    payload: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    aid = (alert_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="alert_id is required")
+    if aid not in _ALERTS:
+        raise HTTPException(status_code=404, detail="alert not found")
+    alert = _ALERTS[aid]
+    if not _alert_eligible_for_otc_word_draft_preview(alert):
+        raise HTTPException(status_code=400, detail="alert is not eligible for OTC Word draft editing")
+    notes = str(payload.get("estr_notes") or payload.get("notes") or "").strip()
+    if not notes:
+        raise HTTPException(status_code=400, detail="estr_notes is required")
+    saved = notes[:_OTC_WORD_DRAFT_MAX_CHARS]
+    _OTC_WORD_DRAFT_OVERRIDES[aid] = {
+        "estr_notes": saved,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_by": str(user.get("email") or user.get("sub") or ""),
+    }
+    audit_trail.record_event_from_user(
+        user,
+        action="report.otc_word_draft.saved",
+        resource_type="alert",
+        resource_id=aid,
+        details={"estr_notes_length": len(saved), "otc_report_kind": getattr(alert, "otc_report_kind", None)},
+    )
+    return {"status": "ok", "alert_id": aid, "estr_notes": saved}
+
+
+@router.post("/otc-word/draft/status")
+async def otc_word_draft_status_bulk(
+    payload: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    raw = payload.get("alert_ids")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(status_code=400, detail="alert_ids must be a non-empty array")
+    out: Dict[str, bool] = {}
+    for x in raw[:500]:
+        aid = str(x or "").strip()
+        if not aid:
+            continue
+        a = _ALERTS.get(aid)
+        if not a:
+            continue
+        if not _alert_visible_to_user(user, a):
+            continue
+        out[aid] = bool(get_saved_otc_word_draft_notes(aid))
+    return {"items": out}
+
+
 @router.post("/str/submit")
 async def submit_str(payload: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user)):
     report_id = payload.get("report_id")
@@ -848,17 +1332,19 @@ async def submit_str(payload: Dict[str, Any], user: Dict[str, Any] = Depends(get
 
 @router.get("/str/eligible-alerts")
 async def list_str_eligible_alerts(
+    request: Request,
     limit: int = Query(500, ge=1, le=1000),
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Alerts that are escalated, CCO-approved for STR, and not false-positive closed (for Regulatory reports UI)."""
+    pg = getattr(request.app.state, "pg", None)
     items: List[AlertResponse] = []
     for a in _ALERTS.values():
         if not _alert_visible_to_user(user, a) or not _alert_not_soft_deleted(a):
             continue
         if not _alert_eligible_for_str(a):
             continue
-        items.append(_enrich_alert_for_api(a))
+        items.append(await _enrich_alert_for_api(a, pg))
     items.sort(key=lambda x: (x.severity or 0.0), reverse=True)
     total = len(items)
     return {"items": items[:limit], "total": total}
@@ -942,6 +1428,16 @@ async def str_docx_bytes_from_report_record(
     """Build STR Word bytes from a persisted STR draft (same logic as download?format=word)."""
     txn_dict = r.get("txn") or {}
     alert_context = r.get("alert") or {}
+    saved_notes = str(r.get("str_notes") or "").strip()
+    if saved_notes:
+        # Keep final generated STR aligned with the saved draft text when user edited the draft directly.
+        return regulatory_narrative_docx_bytes(
+            title="Suspicious transaction report",
+            subtitle=f"Alert: {str(r.get('alert_id') or '').strip() or '—'}",
+            narrative=saved_notes,
+            xml_excerpt=None,
+            source_note="saved_draft_text",
+        )
     customer_id = r.get("customer_id") or alert_context.get("customer_id") or ""
     customer = await get_or_create_customer_kyc(pg, customer_id, txn_dict)
     enrichment: Optional[Dict[str, Any]] = None
@@ -955,7 +1451,7 @@ async def str_docx_bytes_from_report_record(
             all_txn_dicts=all_tx,
             pg=pg,
         )
-    return render_str_docx_bytes(
+    return _render_str_docx_bytes_safe(
         customer=customer,
         txn=txn_dict,
         alert=alert_context,
@@ -979,9 +1475,11 @@ async def download_str(
     if fmt not in {"word", "xml"}:
         raise HTTPException(status_code=400, detail="format must be 'word' or 'xml'")
 
+    aid = r.get("alert_id")
+    alert_obj = _ALERTS.get(aid) if aid else None
+    customer_name_for_file = str((alert_obj.customer_name if alert_obj else "") or "").strip() or "Customer"
+
     if fmt == "xml":
-        aid = r.get("alert_id")
-        alert_obj = _ALERTS.get(aid) if aid else None
         str_notes = r.get("str_notes") or ""
         xml_content = r.get("xml") or ""
         if alert_obj and aid:
@@ -994,10 +1492,20 @@ async def download_str(
                 alert_obj, aid, txn_dict, inflows_total, outflows_total, period_text, str_notes, profile=prof
             )
             r["xml"] = xml_content
+        pg = getattr(request.app.state, "pg", None)
+        customer_id = r.get("customer_id") or (alert_obj.customer_id if alert_obj else "")
+        customer_name = customer_name_for_file
+        if customer_id:
+            try:
+                kyc = await get_or_create_customer_kyc(pg, customer_id, r.get("txn") or {})
+                if customer_name == "Customer":
+                    customer_name = str(getattr(kyc, "customer_name", "") or "").strip() or "Customer"
+            except Exception:
+                customer_name = customer_name_for_file
         return Response(
             content=xml_content,
             media_type="application/xml",
-            headers={"Content-Disposition": f'attachment; filename="STR_{report_id}.xml"'},
+            headers={"Content-Disposition": _report_download_content_disposition(customer_name, "STR", "xml")},
         )
 
     txn_dict = r.get("txn") or {}
@@ -1016,7 +1524,7 @@ async def download_str(
             all_txn_dicts=all_tx,
             pg=pg,
         )
-    doc_bytes = render_str_docx_bytes(
+    doc_bytes = _render_str_docx_bytes_safe(
         customer=customer,
         txn=txn_dict,
         alert=alert_context,
@@ -1026,7 +1534,7 @@ async def download_str(
     return Response(
         content=doc_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="STR_{report_id}.docx"'},
+        headers={"Content-Disposition": _report_download_content_disposition(customer_name_for_file or customer.customer_name, "STR", "docx")},
     )
 
 
@@ -1419,21 +1927,29 @@ async def _create_sar_report_record(
 
 @router.get("/sar/eligible-alerts")
 async def list_sar_eligible_alerts(
+    request: Request,
     limit: int = 500,
     user: Dict[str, Any] = Depends(get_current_user),
 ):
     """Alerts closed as false positive — eligible for suspicious-activity SAR (scoped like the alerts list)."""
     cap = max(1, min(limit, 2000))
+    pg = getattr(request.app.state, "pg", None)
     rows: List[Dict[str, Any]] = []
     for a in _ALERTS.values():
         if not _alert_eligible_for_sar(a):
             continue
         if not _alert_visible_to_user(user, a):
             continue
+        customer_name = str(getattr(a, "customer_name", "") or "").strip()
+        if not customer_name:
+            kyc = await fetch_customer_kyc_any(pg, a.customer_id)
+            customer_name = str(getattr(kyc, "customer_name", "") or "").strip()
         rows.append(
             {
                 "alert_id": a.id,
                 "customer_id": a.customer_id,
+                "customer_name": customer_name or None,
+                "linked_channel": _linked_channel_for_alert(a),
                 "transaction_id": a.transaction_id,
                 "summary": a.summary,
                 "severity": a.severity,
@@ -1447,6 +1963,7 @@ async def list_sar_eligible_alerts(
 
 @router.get("/otc/eligible-alerts")
 async def list_otc_eligible_alerts(
+    request: Request,
     kind: str = Query("estr", description="estr or esar"),
     limit: int = Query(500, ge=1, le=2000),
     user: Dict[str, Any] = Depends(get_current_user),
@@ -1458,16 +1975,23 @@ async def list_otc_eligible_alerts(
     want_estr = k == "estr"
     fn = _alert_eligible_for_otc_estr_word_ready if want_estr else _alert_eligible_for_otc_esar
     cap = max(1, min(limit, 2000))
+    pg = getattr(request.app.state, "pg", None)
     rows: List[Dict[str, Any]] = []
     for a in _ALERTS.values():
         if not fn(a):
             continue
         if not _alert_visible_to_user(user, a):
             continue
+        customer_name = str(getattr(a, "customer_name", "") or "").strip()
+        if not customer_name:
+            kyc = await fetch_customer_kyc_any(pg, a.customer_id)
+            customer_name = str(getattr(kyc, "customer_name", "") or "").strip()
         rows.append(
             {
                 "alert_id": a.id,
                 "customer_id": a.customer_id,
+                "customer_name": customer_name or None,
+                "linked_channel": _linked_channel_for_alert(a),
                 "transaction_id": a.transaction_id,
                 "summary": a.summary,
                 "otc_subject": a.otc_subject,
@@ -1493,6 +2017,7 @@ async def generate_sar_bulk(request: Request, payload: Dict[str, Any], user: Dic
     limit = max(1, min(limit, 500))
     sar_notes = str(payload.get("sar_notes") or payload.get("notes") or "").strip()[:4000]
     us_focus = _payload_us_activity_focus(payload)
+    use_saved_sar = bool(payload.get("use_saved_draft", True))
 
     id_list: List[str] = []
     if isinstance(raw_ids, list) and raw_ids:
@@ -1529,7 +2054,12 @@ async def generate_sar_bulk(request: Request, payload: Dict[str, Any], user: Dic
             if _alert_eligible_for_otc_esar(alert):
                 txn_dict, linked, synthetic = _resolve_txn_for_sar(alert, None)
                 activity_profile = _activity_profile_for_otc_esar(alert)
-                combined_notes = _combine_sar_notes_otc(alert, sar_notes)
+                sar_piece = sar_notes
+                if use_saved_sar:
+                    dn = get_saved_otc_word_draft_notes(aid)
+                    if dn:
+                        sar_piece = dn[:4000]
+                combined_notes = _combine_sar_notes_otc(alert, sar_piece)
                 enrichment = None
                 if not synthetic:
                     enrichment = await build_alert_snapshot(alert=alert, txn=txn_dict, all_txn_dicts=all_tx, pg=pg)
@@ -1613,7 +2143,12 @@ async def generate_sar(request: Request, payload: Dict[str, Any], user: Dict[str
         if _alert_eligible_for_otc_esar(alert):
             txn_dict, linked, synthetic = _resolve_txn_for_sar(alert, txn_override)
             activity_profile = _activity_profile_for_otc_esar(alert)
-            combined_notes = _combine_sar_notes_otc(alert, sar_notes)
+            sar_notes_eff = sar_notes
+            if bool(payload.get("use_saved_draft", True)):
+                dn = get_saved_otc_word_draft_notes(alert_id)
+                if dn:
+                    sar_notes_eff = dn[:4000]
+            combined_notes = _combine_sar_notes_otc(alert, sar_notes_eff)
             enrichment = None
             if not synthetic:
                 all_tx = [t.model_dump() for t in _TXNS.values()]
@@ -1695,8 +2230,15 @@ async def download_sar(
     if not r or not _report_not_soft_deleted(r) or r.get("type") != "SAR":
         raise HTTPException(status_code=404, detail="SAR report not found")
     fmt = format.lower().strip()
+    pg = getattr(request.app.state, "pg", None)
+    txn_dict = r.get("txn") or {}
+    customer = await get_or_create_customer_kyc(pg, str(r.get("customer_id") or ""), txn_dict)
     if fmt == "xml":
-        return _download_registered_report(report_id, format, filename_prefix="SAR", title="Suspicious Activity Report (demo)")
+        return Response(
+            content=(r.get("xml") or ""),
+            media_type="application/xml",
+            headers={"Content-Disposition": _report_download_content_disposition(customer.customer_name, "SAR", "xml")},
+        )
 
     if fmt != "word":
         raise HTTPException(status_code=400, detail="format must be 'word' or 'xml'")
@@ -1705,9 +2247,6 @@ async def download_sar(
     if not isinstance(sections, dict):
         raise HTTPException(status_code=400, detail="This SAR predates Word export; regenerate the SAR.")
 
-    pg = getattr(request.app.state, "pg", None)
-    txn_dict = r.get("txn") or {}
-    customer = await get_or_create_customer_kyc(pg, str(r.get("customer_id") or ""), txn_dict)
     sig_path = (settings.cco_signature_image_path or "").strip() or None
     doc_bytes = render_sar_docx_bytes(
         customer=customer,
@@ -1720,7 +2259,7 @@ async def download_sar(
     return Response(
         content=doc_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="SAR_{report_id}.docx"'},
+        headers={"Content-Disposition": _report_download_content_disposition(customer.customer_name, "SAR", "docx")},
     )
 
 
@@ -1940,6 +2479,10 @@ async def _create_estr_draft(
 async def generate_estr(request: Request, payload: Dict[str, Any], user: Dict[str, Any] = Depends(get_current_user)):
     base_alert = str(payload.get("alert_id") or "").strip()
     user_notes = str(payload.get("estr_notes") or payload.get("notes") or "").strip()[:8000]
+    if bool(payload.get("use_saved_draft", True)) and base_alert:
+        draft_notes = get_saved_otc_word_draft_notes(base_alert)
+        if draft_notes:
+            user_notes = draft_notes[:8000]
     return await _create_estr_draft(request, user, base_alert=base_alert, user_notes=user_notes)
 
 
@@ -1954,6 +2497,7 @@ async def generate_estr_bulk(request: Request, payload: Dict[str, Any], user: Di
     limit = int(payload.get("limit") or 500)
     limit = max(1, min(limit, 500))
     estr_notes = str(payload.get("estr_notes") or payload.get("notes") or "").strip()[:8000]
+    use_saved = bool(payload.get("use_saved_draft", True))
 
     id_list: List[str] = []
     if isinstance(raw_ids, list) and raw_ids:
@@ -1974,7 +2518,12 @@ async def generate_estr_bulk(request: Request, payload: Dict[str, Any], user: Di
         alert_row = _ALERTS.get(aid)
         cid = alert_row.customer_id if alert_row else ""
         try:
-            out = await _create_estr_draft(request, user, base_alert=aid, user_notes=estr_notes)
+            notes_eff = estr_notes
+            if use_saved:
+                dn = get_saved_otc_word_draft_notes(aid)
+                if dn:
+                    notes_eff = dn[:8000]
+            out = await _create_estr_draft(request, user, base_alert=aid, user_notes=notes_eff)
             results.append({"alert_id": aid, "customer_id": cid, "ok": True, **out})
         except HTTPException as e:
             results.append({"alert_id": aid, "customer_id": cid, "ok": False, "error": _http_exception_detail_str(e)})
@@ -1998,8 +2547,6 @@ async def download_estr(
     fmt = format.lower().strip()
     if fmt not in {"word", "xml"}:
         raise HTTPException(status_code=400, detail="format must be 'word' or 'xml'")
-    if fmt == "xml":
-        return _download_registered_report(report_id, fmt, filename_prefix="ESTR", title="Extended STR (demo)")
 
     cid = str(r.get("customer_id") or "")
     aid = r.get("alert_id")
@@ -2010,20 +2557,30 @@ async def download_estr(
 
     pg = getattr(request.app.state, "pg", None)
     customer = await get_or_create_customer_kyc(pg, cid or "UNKNOWN", txn_dict)
+    bvn_linked_accounts = await list_bvn_linked_accounts(
+        pg, str(customer.id_number or "").strip(), primary_customer_id=cid or "UNKNOWN"
+    )
     alert_dict = _ALERTS[aid_str].model_dump() if aid_str and _ALERTS.get(aid_str) else None
+    kind = str((alert_dict or {}).get("otc_report_kind") or "").strip().lower()
+    report_label = "OTC_ESAR" if kind == "otc_esar" else "OTC_ESTR"
+    if fmt == "xml":
+        return Response(
+            content=(r.get("xml") or ""),
+            media_type="application/xml",
+            headers={"Content-Disposition": _report_download_content_disposition(customer.customer_name, report_label, "xml")},
+        )
     estr_notes = str(r.get("estr_notes") or "")
     doc_bytes = await render_otc_estr_docx_bytes(
         customer=customer,
         alert=alert_dict,
         estr_notes=estr_notes,
         approver_name=_approver_display_name(user),
+        bvn_linked_accounts=bvn_linked_accounts,
     )
-    stored_name = str(r.get("customer_display_name") or "").strip()
-    name_for_file = stored_name or (customer.customer_name or "").strip()
     return Response(
         content=doc_bytes,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": _estr_word_content_disposition_header(name_for_file, report_id)},
+        headers={"Content-Disposition": _report_download_content_disposition(customer.customer_name, report_label, "docx")},
     )
 
 

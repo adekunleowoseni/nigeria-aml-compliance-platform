@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { reportsApi, leaApi, customersApi, type Alert } from '../services/api';
+import { reportsApi, leaApi, customersApi, aiApi, type Alert } from '../services/api';
 import DashboardLayout from '../components/layout/DashboardLayout';
 import { useReportActionStore } from '../store/reportActionStore';
 import { useAuthStore } from '../store/authStore';
@@ -10,6 +10,20 @@ function alertEligibleForStr(a: Alert): boolean {
   if ((a.last_resolution || '').trim() === 'false_positive') return false;
   if (a.status !== 'escalated') return false;
   return Boolean(a.cco_str_approved);
+}
+
+function displayCustomer(a: Pick<Alert, 'customer_name' | 'customer_id'>): string {
+  return String(a.customer_name || '').trim() || a.customer_id;
+}
+
+function displayChannel(rawChannel?: string | null): string {
+  const raw = String(rawChannel || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (raw === 'pos' || raw === 'pos_terminal') return 'POS terminal';
+  if (raw === 'atm') return 'ATM';
+  if (raw === 'otc_branch') return 'OTC branch';
+  if (raw === 'nibss_nip' || raw === 'nibss') return 'NIBSS/NIP';
+  return raw.replace(/_/g, ' ');
 }
 
 /** Sent when the UI no longer collects analyst STR notes (API still requires a non-empty value). */
@@ -28,6 +42,7 @@ type StrBulkRow =
       customer_id?: string;
       ok: true;
       report_id: string;
+      used_saved_draft?: boolean;
       aop_report_id?: string;
       soa_report_id?: string;
       soa_period_start?: string;
@@ -50,6 +65,8 @@ type EstrBulkRow =
 type SarModalRow = {
   alert_id: string;
   customer_id: string;
+  customer_name?: string | null;
+  linked_channel?: string | null;
   transaction_id: string;
   summary?: string | null;
   otc_subject?: string | null;
@@ -77,6 +94,27 @@ export default function Reports() {
   const [downloading, setDownloading] = useState<Record<string, string | undefined>>({});
   const [alertSearch, setAlertSearch] = useState('');
   const [modalRiskFirst, setModalRiskFirst] = useState(true);
+  const [strDraftModalAlertId, setStrDraftModalAlertId] = useState<string | null>(null);
+  const [strDraftNotesById, setStrDraftNotesById] = useState<Record<string, string>>({});
+  const [strPreviewById, setStrPreviewById] = useState<Record<string, string[]>>({});
+  const [strDraftBusyById, setStrDraftBusyById] = useState<Record<string, boolean>>({});
+  const [strDraftSaveBusyById, setStrDraftSaveBusyById] = useState<Record<string, boolean>>({});
+  const [strDraftDownloadBusyById, setStrDraftDownloadBusyById] = useState<Record<string, boolean>>({});
+  const [strDraftSavedById, setStrDraftSavedById] = useState<Record<string, boolean>>({});
+  const [strDraftModalError, setStrDraftModalError] = useState<string | null>(null);
+  const [otcWordDraftModalAlertId, setOtcWordDraftModalAlertId] = useState<string | null>(null);
+  const [otcWordDraftKind, setOtcWordDraftKind] = useState<'otc_estr' | 'otc_esar' | null>(null);
+  const [otcWordDraftNotesById, setOtcWordDraftNotesById] = useState<Record<string, string>>({});
+  const [otcWordPreviewById, setOtcWordPreviewById] = useState<Record<string, string[]>>({});
+  const [otcWordDraftBusyById, setOtcWordDraftBusyById] = useState<Record<string, boolean>>({});
+  const [otcWordDraftSaveBusyById, setOtcWordDraftSaveBusyById] = useState<Record<string, boolean>>({});
+  const [otcWordDraftDownloadBusyById, setOtcWordDraftDownloadBusyById] = useState<Record<string, boolean>>({});
+  const [otcWordDraftSavedById, setOtcWordDraftSavedById] = useState<Record<string, boolean>>({});
+  const [otcWordDraftModalError, setOtcWordDraftModalError] = useState<string | null>(null);
+  const [coAiHelperOpen, setCoAiHelperOpen] = useState(false);
+  const [coAiInstruction, setCoAiInstruction] = useState('');
+  const [coAiRefineBusy, setCoAiRefineBusy] = useState(false);
+  const [coAiInlineMsg, setCoAiInlineMsg] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   const [sarModalSelectedIds, setSarModalSelectedIds] = useState<string[]>([]);
   const [sarModalSearch, setSarModalSearch] = useState('');
@@ -101,6 +139,7 @@ export default function Reports() {
   const [ftrMsg, setFtrMsg] = useState<string | null>(null);
 
   const [leaCustomerId, setLeaCustomerId] = useState('');
+  const [leaCustomerSearch, setLeaCustomerSearch] = useState('');
   const [leaAgency, setLeaAgency] = useState('EFCC');
   const [leaPeriodStart, setLeaPeriodStart] = useState('');
   const [leaPeriodEnd, setLeaPeriodEnd] = useState('');
@@ -110,6 +149,8 @@ export default function Reports() {
   const [leaInternalNotes, setLeaInternalNotes] = useState('');
   const [leaRequestId, setLeaRequestId] = useState('');
   const [leaCcoNotes, setLeaCcoNotes] = useState('');
+  const [leaEmailSubjectEdit, setLeaEmailSubjectEdit] = useState('');
+  const [leaEmailBodyEdit, setLeaEmailBodyEdit] = useState('');
   const [leaClientPublicIp, setLeaClientPublicIp] = useState<string | null>(null);
   const [leaClientPublicIpStatus, setLeaClientPublicIpStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
 
@@ -171,6 +212,51 @@ export default function Reports() {
     enabled: !!leaRequestId.trim(),
   });
 
+  const { data: leaCustomerSearchData } = useQuery({
+    queryKey: ['lea', 'customer-search', leaCustomerSearch],
+    queryFn: () => customersApi.list({ page: 1, page_size: 20, q: leaCustomerSearch.trim() || undefined }),
+    enabled: reportFamily === 'lea' && leaCustomerSearch.trim().length > 0,
+  });
+
+  const { data: leaSelectedCustomerData } = useQuery({
+    queryKey: ['lea', 'selected-customer', leaCustomerId],
+    queryFn: () => customersApi.get(leaCustomerId),
+    enabled: reportFamily === 'lea' && !!leaCustomerId.trim(),
+  });
+
+  const { data: leaPreviewData } = useQuery({
+    queryKey: [
+      'lea',
+      'preview',
+      leaCustomerId,
+      leaAgency,
+      leaRecipientEmail,
+      leaPeriodStart,
+      leaPeriodEnd,
+      leaIncludeAop,
+      leaWorkstationId,
+      leaInternalNotes,
+      leaClientPublicIp,
+      leaEmailSubjectEdit,
+      leaEmailBodyEdit,
+    ],
+    queryFn: () =>
+      leaApi.preview({
+        customer_id: leaCustomerId.trim(),
+        agency: leaAgency,
+        recipient_email: leaRecipientEmail.trim() || 'investigator@agency.gov.ng',
+        period_start: leaPeriodStart.trim() || undefined,
+        period_end: leaPeriodEnd.trim() || undefined,
+        include_aop: leaIncludeAop,
+        workstation_mac: leaWorkstationId.trim() || undefined,
+        internal_notes: leaInternalNotes.trim() || undefined,
+        client_public_ip: leaClientPublicIp?.trim() || undefined,
+        email_subject_override: leaEmailSubjectEdit.trim() || undefined,
+        email_body_override: leaEmailBodyEdit.trim() || undefined,
+      }),
+    enabled: reportFamily === 'lea' && !!leaCustomerId.trim(),
+  });
+
   useEffect(() => {
     if (reportFamily !== 'lea') return;
     void refreshLeaPublicIp();
@@ -193,6 +279,8 @@ export default function Reports() {
         .map((r) => ({
           alert_id: r.alert_id,
           customer_id: r.customer_id,
+          customer_name: r.customer_name,
+          linked_channel: r.linked_channel,
           transaction_id: r.transaction_id,
           summary: r.summary,
           severity: r.severity,
@@ -208,6 +296,8 @@ export default function Reports() {
         .map((r) => ({
           alert_id: r.alert_id,
           customer_id: r.customer_id,
+          customer_name: r.customer_name,
+          linked_channel: r.linked_channel,
           transaction_id: r.transaction_id,
           summary: r.summary,
           otc_subject: r.otc_subject,
@@ -225,6 +315,8 @@ export default function Reports() {
       rows = rows.filter(
         (r) =>
           r.alert_id.toLowerCase().includes(q) ||
+          (r.customer_name ?? '').toLowerCase().includes(q) ||
+          displayChannel(r.linked_channel).toLowerCase().includes(q) ||
           r.customer_id.toLowerCase().includes(q) ||
           r.transaction_id.toLowerCase().includes(q) ||
           (r.summary ?? '').toLowerCase().includes(q)
@@ -243,6 +335,8 @@ export default function Reports() {
       rows = rows.filter(
         (r) =>
           r.alert_id.toLowerCase().includes(q) ||
+          (r.customer_name ?? '').toLowerCase().includes(q) ||
+          displayChannel(r.linked_channel).toLowerCase().includes(q) ||
           r.customer_id.toLowerCase().includes(q) ||
           r.transaction_id.toLowerCase().includes(q) ||
           (r.summary ?? '').toLowerCase().includes(q) ||
@@ -262,6 +356,8 @@ export default function Reports() {
       rows = rows.filter(
         (r) =>
           r.alert_id.toLowerCase().includes(q) ||
+          (r.customer_name ?? '').toLowerCase().includes(q) ||
+          displayChannel(r.linked_channel).toLowerCase().includes(q) ||
           r.customer_id.toLowerCase().includes(q) ||
           r.transaction_id.toLowerCase().includes(q) ||
           (r.summary ?? '').toLowerCase().includes(q) ||
@@ -307,6 +403,7 @@ export default function Reports() {
       if (!q) return true;
       return (
         a.id.toLowerCase().includes(q) ||
+        (a.customer_name ?? '').toLowerCase().includes(q) ||
         a.customer_id.toLowerCase().includes(q) ||
         a.transaction_id.toLowerCase().includes(q) ||
         (a.summary ?? '').toLowerCase().includes(q)
@@ -317,6 +414,10 @@ export default function Reports() {
     else rows.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     return rows;
   }, [alerts, alertSearch, modalRiskFirst]);
+  const eligibleModalAlertIds = useMemo(
+    () => modalAlerts.filter((a) => alertEligibleForStr(a)).map((a) => a.id),
+    [modalAlerts]
+  );
 
   const strEligibleIdsInView = useMemo(
     () => modalAlerts.filter((a) => alertEligibleForStr(a)).map((a) => a.id),
@@ -333,6 +434,60 @@ export default function Reports() {
     if (!el) return;
     el.indeterminate = strSomeEligibleInViewSelected;
   }, [strSomeEligibleInViewSelected]);
+
+  useEffect(() => {
+    if (!showStrModal) return;
+    if (eligibleModalAlertIds.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await reportsApi.strDraftStatusBulk(eligibleModalAlertIds);
+        if (cancelled) return;
+        setStrDraftSavedById((prev) => ({ ...prev, ...(res.items || {}) }));
+      } catch {
+        // Best-effort badge hydration only.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showStrModal, eligibleModalAlertIds]);
+
+  useEffect(() => {
+    if (!showOtcEstrModal) return;
+    if (otcEstrIdsInView.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await reportsApi.otcWordDraftStatusBulk(otcEstrIdsInView);
+        if (cancelled) return;
+        setOtcWordDraftSavedById((prev) => ({ ...prev, ...(res.items || {}) }));
+      } catch {
+        /* best-effort */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showOtcEstrModal, otcEstrIdsInView]);
+
+  useEffect(() => {
+    if (!showOtcEsarModal) return;
+    if (otcEsarIdsInView.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await reportsApi.otcWordDraftStatusBulk(otcEsarIdsInView);
+        if (cancelled) return;
+        setOtcWordDraftSavedById((prev) => ({ ...prev, ...(res.items || {}) }));
+      } catch {
+        /* best-effort */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showOtcEsarModal, otcEsarIdsInView]);
 
   const canSubmitStr = strSelectedIds.length > 0;
 
@@ -355,6 +510,7 @@ export default function Reports() {
       reportsApi.generateSTRBulk({
         alert_ids: alertIds,
         str_notes: STR_BULK_DEFAULT_NOTES,
+        use_saved_draft: true,
         include_aop: includeAop,
         include_soa: includeSoa,
         statement_period_start: soaStart.trim() || undefined,
@@ -401,6 +557,55 @@ export default function Reports() {
     strAopProduct,
   ]);
 
+  const setStrDraftBusy = useCallback((alertId: string, busy: boolean) => {
+    setStrDraftBusyById((prev) => ({ ...prev, [alertId]: busy }));
+  }, []);
+  const setOtcWordDraftBusy = useCallback((alertId: string, busy: boolean) => {
+    setOtcWordDraftBusyById((prev) => ({ ...prev, [alertId]: busy }));
+  }, []);
+  const editorTextFromOtcWordPreview = useCallback(
+    (res: { estr_notes?: string; word_preview_lines?: string[]; has_saved_draft?: boolean }) => {
+      const notes = String(res.estr_notes || '').trim();
+      const fullPreview = (res.word_preview_lines || []).join('\n\n').trim();
+      if (res.has_saved_draft && notes) return notes;
+      if (fullPreview) return fullPreview;
+      if (notes) return notes;
+      return fullPreview || notes || '';
+    },
+    []
+  );
+  const editorTextFromPreview = useCallback((res: { str_notes?: string; word_preview_lines?: string[]; has_saved_draft?: boolean }) => {
+    const notes = String(res.str_notes || '').trim();
+    const fullPreview = (res.word_preview_lines || []).join('\n\n').trim();
+    if (res.has_saved_draft && notes) return notes;
+    if (fullPreview) return fullPreview;
+    if (notes && notes.toLowerCase() !== 'str draft note') return notes;
+    return fullPreview || notes || 'STR draft note';
+  }, []);
+  const coAiComposedPrompt = useMemo(() => {
+    if (!strDraftModalAlertId) return '';
+    const draft = (strDraftNotesById[strDraftModalAlertId] || '').trim();
+    const instruction =
+      coAiInstruction.trim() ||
+      'Rewrite this STR draft to be clearer and regulator-ready in simple, precise language. Keep all factual details and amounts accurate.';
+    return [
+      'You are an AML compliance reporting assistant.',
+      '',
+      'Task:',
+      instruction,
+      '',
+      `Alert ID: ${strDraftModalAlertId}`,
+      '',
+      'Current STR draft text:',
+      draft || '(empty)',
+      '',
+      'Output requirements:',
+      '- Keep all facts, dates, amounts, account identifiers, and names accurate.',
+      '- Improve clarity and professional tone for regulatory reporting.',
+      '- Return only the improved narrative text ready to paste.',
+    ].join('\n');
+  }, [strDraftModalAlertId, strDraftNotesById, coAiInstruction]);
+
   const ctrMutation = useMutation({
     mutationFn: () => reportsApi.generateCTR({}),
     onSuccess: (data) =>
@@ -445,6 +650,7 @@ export default function Reports() {
     mutationFn: () =>
       reportsApi.generateSAR({
         alert_id: otcEsarModalSelectedIds[0],
+        use_saved_draft: true,
       }),
     onSuccess: (data) => {
       setSarResult(data);
@@ -460,6 +666,7 @@ export default function Reports() {
     mutationFn: (opts: { alert_ids: string[] }) =>
       reportsApi.generateSARBulk({
         alert_ids: opts.alert_ids,
+        use_saved_draft: true,
       }),
     onSuccess: (data) => {
       setSarBulkSummary({ generated: data.generated, requested: data.requested });
@@ -475,6 +682,7 @@ export default function Reports() {
       reportsApi.generateESTRBulk({
         alert_ids: opts.alert_ids,
         estr_notes: otcEstrNotes.trim() || undefined,
+        use_saved_draft: true,
       }),
     onSuccess: (data) => {
       setOtcEstrBulkSummary({ generated: data.generated, requested: data.requested });
@@ -501,6 +709,8 @@ export default function Reports() {
         workstation_mac: leaWorkstationId.trim() || undefined,
         internal_notes: leaInternalNotes.trim() || undefined,
         client_public_ip: leaClientPublicIp?.trim() || undefined,
+        email_subject_override: leaEmailSubjectEdit.trim() || undefined,
+        email_body_override: leaEmailBodyEdit.trim() || undefined,
         submit_for_cco: true,
       }),
     onSuccess: (data) => {
@@ -528,9 +738,13 @@ export default function Reports() {
   });
 
   const leaSendMutation = useMutation({
-    mutationFn: (id: string) => leaApi.sendPackage(id),
-    onSuccess: (_, id) => {
-      void queryClient.invalidateQueries({ queryKey: ['lea', 'request', id] });
+    mutationFn: (opts: { id: string; email_subject_override?: string; email_body_override?: string }) =>
+      leaApi.sendPackage(opts.id, {
+        email_subject_override: opts.email_subject_override,
+        email_body_override: opts.email_body_override,
+      }),
+    onSuccess: (_, opts) => {
+      void queryClient.invalidateQueries({ queryKey: ['lea', 'request', opts.id] });
     },
   });
 
@@ -942,7 +1156,8 @@ export default function Reports() {
             </div>
           )}
 
-          <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm max-w-2xl mb-8">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-8">
+          <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm">
             <label className="block text-sm font-medium text-slate-700 mb-1">Requesting agency *</label>
             <select
               className="w-full text-sm border rounded px-2 py-2 mb-3"
@@ -955,14 +1170,61 @@ export default function Reports() {
                 </option>
               ))}
             </select>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Customer ID *</label>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Customer search (name, account, or ID) *</label>
             <input
-              className="w-full text-sm border rounded px-2 py-1.5 mb-3 font-mono"
+              className="w-full text-sm border rounded px-2 py-1.5 mb-2"
+              value={leaCustomerSearch}
+              onChange={(e) => setLeaCustomerSearch(e.target.value)}
+              placeholder="Type customer name, account number, or customer ID"
+            />
+            {leaCustomerSearch.trim() && (leaCustomerSearchData?.items?.length ?? 0) > 0 && (
+              <div className="max-h-44 overflow-auto border border-slate-200 rounded mb-3">
+                {(leaCustomerSearchData?.items ?? []).map((c) => (
+                  <button
+                    key={c.customer_id}
+                    type="button"
+                    onClick={() => {
+                      setLeaCustomerId(c.customer_id);
+                      setLeaCustomerSearch(`${c.customer_name} (${c.account_number})`);
+                    }}
+                    className={`w-full text-left px-2 py-1.5 text-xs border-b last:border-b-0 hover:bg-slate-50 ${
+                      leaCustomerId === c.customer_id ? 'bg-emerald-50' : ''
+                    }`}
+                  >
+                    <span className="font-medium text-slate-900">{c.customer_name}</span>{' '}
+                    <span className="font-mono text-slate-700">{c.account_number}</span>{' '}
+                    <span className="text-slate-500">· {c.customer_id}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <label className="block text-xs font-medium text-slate-700 mb-1">Selected customer ID</label>
+            <input
+              className="w-full text-sm border rounded px-2 py-1.5 mb-2 font-mono"
               value={leaCustomerId}
               onChange={(e) => setLeaCustomerId(e.target.value)}
               placeholder="e.g. DEMO-PERSON-ADESANYA"
             />
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
+            {leaSelectedCustomerData?.kyc ? (
+              <div className="text-xs bg-slate-50 border border-slate-200 rounded p-2 mb-3">
+                <div>
+                  <strong>{leaSelectedCustomerData.kyc.customer_name}</strong> · Acct{' '}
+                  <span className="font-mono">{leaSelectedCustomerData.kyc.account_number}</span>
+                </div>
+                <div className="mt-1">
+                  {leaSelectedCustomerData.aop_uploads?.length ? (
+                    <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-900 px-2 py-0.5">
+                      AOP on file ({leaSelectedCustomerData.aop_uploads.length})
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-900 px-2 py-0.5">
+                      No AOP on file
+                    </span>
+                  )}
+                </div>
+              </div>
+            ) : null}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
               <div>
                 <label className="block text-xs text-slate-600 mb-1">Statement period start (optional)</label>
                 <input
@@ -982,10 +1244,16 @@ export default function Reports() {
                 />
               </div>
             </div>
-            <p className="text-xs text-slate-500 mb-3">
+            <p className="text-xs text-slate-500 mb-1">
               Leave dates empty to use the full span from account opening (KYC) through today. The server clamps to that
               window.
             </p>
+            {leaPreviewData?.statement_generated ? (
+              <p className="text-xs text-emerald-800 mb-3">
+                Statement of account ready for selected customer ({leaPreviewData.period_start} to {leaPreviewData.period_end})
+                with {leaPreviewData.statement_rows} rows.
+              </p>
+            ) : null}
             <label className="block text-sm font-medium text-slate-700 mb-1">LEA recipient email *</label>
             <input
               type="email"
@@ -1069,7 +1337,13 @@ export default function Reports() {
               <button
                 type="button"
                 onClick={() => {
-                  if (leaRequestId) leaSendMutation.mutate(leaRequestId);
+                  if (leaRequestId) {
+                    leaSendMutation.mutate({
+                      id: leaRequestId,
+                      email_subject_override: leaEmailSubjectEdit.trim() || undefined,
+                      email_body_override: leaEmailBodyEdit.trim() || undefined,
+                    });
+                  }
                 }}
                 disabled={!leaRequestId || leaSendMutation.isPending || leaActiveRequest?.status !== 'approved'}
                 className="px-4 py-2 text-sm bg-emerald-700 text-white rounded-lg hover:bg-emerald-800 disabled:opacity-50"
@@ -1129,6 +1403,62 @@ export default function Reports() {
                 ) : null}
               </div>
             )}
+          </div>
+          <div className="bg-white border border-slate-200 rounded-lg p-4 shadow-sm">
+            <h3 className="font-medium text-slate-900 mb-2">Email preview (to requesting agency)</h3>
+            {!leaCustomerId.trim() ? (
+              <p className="text-sm text-slate-500">Select a customer to preview the outgoing email and document package.</p>
+            ) : !leaPreviewData ? (
+              <p className="text-sm text-slate-500">Preparing preview...</p>
+            ) : (
+              <div className="space-y-3">
+                <div className="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded p-2">
+                  <div>
+                    <strong>Customer:</strong> {leaPreviewData.customer_name || leaPreviewData.customer_id}
+                    {leaPreviewData.account_number ? (
+                      <>
+                        {' '}
+                        · <span className="font-mono">{leaPreviewData.account_number}</span>
+                      </>
+                    ) : null}
+                  </div>
+                  <div>
+                    <strong>Recipient:</strong> {leaPreviewData.recipient_email}
+                  </div>
+                  <div>
+                    <strong>Statement window:</strong> {leaPreviewData.period_start} to {leaPreviewData.period_end}
+                  </div>
+                </div>
+                <div className="text-xs">
+                  <div className="font-medium text-slate-700 mb-1">Documents to be sent</div>
+                  <ul className="space-y-1">
+                    {leaPreviewData.attachments.map((a) => (
+                      <li key={`${a.kind}-${a.name}`} className="border border-slate-200 rounded px-2 py-1 bg-slate-50">
+                        {a.name} · {a.generated ? 'generated' : 'pending'}
+                        {a.kind === 'aop' ? ` · ${a.on_file ? 'AOP exists on customer profile' : 'AOP will be generated on send'}` : ''}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="text-xs">
+                  <div className="font-medium text-slate-700">Subject</div>
+                  <textarea
+                    className="mt-1 p-2 border border-slate-200 rounded bg-slate-50 w-full min-h-[70px]"
+                    value={leaEmailSubjectEdit || leaPreviewData.email_subject}
+                    onChange={(e) => setLeaEmailSubjectEdit(e.target.value)}
+                  />
+                </div>
+                <div className="text-xs">
+                  <div className="font-medium text-slate-700">Body</div>
+                  <textarea
+                    className="mt-1 p-2 border border-slate-200 rounded bg-slate-50 whitespace-pre-wrap max-h-[420px] overflow-auto w-full min-h-[420px] font-mono"
+                    value={leaEmailBodyEdit || leaPreviewData.email_body}
+                    onChange={(e) => setLeaEmailBodyEdit(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
           </div>
         </>
       )}
@@ -1219,20 +1549,10 @@ export default function Reports() {
                     >
                       XML
                     </button>
-                    {row.customer_id ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          dl(`str-b-${row.report_id}-sup`, () =>
-                            customersApi.downloadSupportingDocumentsBundle(row.customer_id!)
-                          )
-                        }
-                        disabled={!!downloading[`str-b-${row.report_id}-sup`]}
-                        className="px-2 py-0.5 text-xs bg-teal-700 text-white rounded disabled:opacity-50"
-                        title="All customer uploads merged into one PDF"
-                      >
-                        Supporting PDF
-                      </button>
+                    {row.used_saved_draft ? (
+                      <span className="px-2 py-0.5 text-[11px] rounded-full bg-emerald-100 text-emerald-800 font-medium">
+                        Draft text applied
+                      </span>
                     ) : null}
                     {row.aop_report_id ? (
                       <>
@@ -1510,6 +1830,8 @@ export default function Reports() {
                     <th className="p-2">Workflow</th>
                     <th className="p-2">Summary</th>
                     <th className="p-2">Customer</th>
+                    <th className="p-2">Channel</th>
+                    <th className="p-2">Draft</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1549,7 +1871,43 @@ export default function Reports() {
                           )}
                         </td>
                         <td className="p-2 max-w-[180px] truncate">{a.summary ?? '—'}</td>
-                        <td className="p-2 font-mono text-xs">{a.customer_id}</td>
+                        <td className="p-2 text-xs">{displayCustomer(a)}</td>
+                        <td className="p-2 text-xs">{displayChannel(a.linked_channel) || '—'}</td>
+                        <td className="p-2 text-xs" onClick={(e) => e.stopPropagation()}>
+                          {ok ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={!!strDraftBusyById[a.id]}
+                                onClick={async () => {
+                                  setStrDraftModalAlertId(a.id);
+                                  setStrDraftBusy(a.id, true);
+                                  try {
+                                    const res = await reportsApi.getSTRDraftPreview(a.id);
+                                  setStrDraftModalError(null);
+                                  setStrDraftNotesById((prev) => ({ ...prev, [a.id]: editorTextFromPreview(res) }));
+                                    setStrPreviewById((prev) => ({ ...prev, [a.id]: res.word_preview_lines || [] }));
+                                    setStrDraftSavedById((prev) => ({ ...prev, [a.id]: !!res.has_saved_draft }));
+                                } catch (e) {
+                                  setStrDraftModalError(e instanceof Error ? e.message : 'Could not load STR draft preview.');
+                                  } finally {
+                                    setStrDraftBusy(a.id, false);
+                                  }
+                                }}
+                                className="px-2 py-1 rounded bg-indigo-600 text-white disabled:opacity-50"
+                              >
+                                {strDraftBusyById[a.id] ? 'Loading…' : 'Load preview'}
+                              </button>
+                              {strDraftSavedById[a.id] ? (
+                                <span className="ml-2 inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800 ring-1 ring-emerald-200">
+                                  Draft saved
+                                </span>
+                              ) : null}
+                            </>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
                       </tr>
                     );
                   })}
@@ -1641,6 +1999,226 @@ export default function Reports() {
         </div>
       )}
 
+      {strDraftModalAlertId && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50"
+          onClick={() =>
+            !strDraftBusyById[strDraftModalAlertId] &&
+            !strDraftSaveBusyById[strDraftModalAlertId] &&
+            setStrDraftModalAlertId(null)
+          }
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="co-str-draft-modal-title"
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl max-w-6xl w-full p-6 max-h-[90vh] overflow-y-auto relative"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="co-str-draft-modal-title" className="text-lg font-semibold text-slate-900 mb-2">
+              STR draft editor (CO)
+            </h2>
+            <p className="text-xs text-slate-600 mb-3 font-mono">Alert: {strDraftModalAlertId}</p>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div>
+                <p className="text-xs font-semibold text-slate-700 mb-1">Editor</p>
+                <textarea
+                  value={strDraftNotesById[strDraftModalAlertId] ?? ''}
+                  onChange={(e) =>
+                    setStrDraftNotesById((prev) => ({
+                      ...prev,
+                      [strDraftModalAlertId]: e.target.value,
+                    }))
+                  }
+                  rows={14}
+                  placeholder="Edit STR narrative notes for this alert..."
+                  className="w-full rounded border border-indigo-300 px-3 py-2 text-sm bg-white"
+                />
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={!!strDraftBusyById[strDraftModalAlertId]}
+                    onClick={async () => {
+                      const aid = strDraftModalAlertId;
+                      if (!aid) return;
+                      setStrDraftBusy(aid, true);
+                      try {
+                        const res = await reportsApi.getSTRDraftPreview(aid);
+                        setStrDraftModalError(null);
+                        setStrDraftNotesById((prev) => ({ ...prev, [aid]: editorTextFromPreview(res) }));
+                        setStrPreviewById((prev) => ({ ...prev, [aid]: res.word_preview_lines || [] }));
+                      } catch (e) {
+                        setStrDraftModalError(e instanceof Error ? e.message : 'Could not refresh STR draft preview.');
+                      } finally {
+                        setStrDraftBusy(aid, false);
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white disabled:opacity-50"
+                  >
+                    {strDraftBusyById[strDraftModalAlertId] ? 'Refreshing…' : 'Refresh preview'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      !!strDraftBusyById[strDraftModalAlertId] ||
+                      !!strDraftSaveBusyById[strDraftModalAlertId] ||
+                      !(strDraftNotesById[strDraftModalAlertId] || '').trim()
+                    }
+                    onClick={async () => {
+                      const aid = strDraftModalAlertId;
+                      if (!aid) return;
+                      const v = (strDraftNotesById[aid] || '').trim();
+                      if (!v) return;
+                      setStrDraftSaveBusyById((prev) => ({ ...prev, [aid]: true }));
+                      try {
+                        await reportsApi.saveSTRDraft(aid, { str_notes: v });
+                        const res = await reportsApi.getSTRDraftPreview(aid);
+                        setStrPreviewById((prev) => ({ ...prev, [aid]: res.word_preview_lines || [] }));
+                        setStrDraftSavedById((prev) => ({ ...prev, [aid]: true }));
+                        setStrDraftModalError(null);
+                      } catch (e) {
+                        setStrDraftModalError(e instanceof Error ? e.message : 'Could not save draft edits.');
+                      } finally {
+                        setStrDraftSaveBusyById((prev) => ({ ...prev, [aid]: false }));
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-emerald-600 text-white disabled:opacity-50"
+                  >
+                    {strDraftSaveBusyById[strDraftModalAlertId] ? 'Saving…' : 'Save draft edits'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!!strDraftDownloadBusyById[strDraftModalAlertId]}
+                    onClick={async () => {
+                      const aid = strDraftModalAlertId;
+                      if (!aid) return;
+                      setStrDraftDownloadBusyById((prev) => ({ ...prev, [aid]: true }));
+                      try {
+                        await reportsApi.downloadSTRDraftPreview(aid);
+                        setStrDraftModalError(null);
+                      } catch (e) {
+                        setStrDraftModalError(e instanceof Error ? e.message : 'Could not download preview.');
+                      } finally {
+                        setStrDraftDownloadBusyById((prev) => ({ ...prev, [aid]: false }));
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-slate-700 text-white disabled:opacity-50"
+                  >
+                    {strDraftDownloadBusyById[strDraftModalAlertId] ? 'Downloading…' : 'Download preview (.docx)'}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate-700 mb-1">Word preview</p>
+                <div className="h-full min-h-[290px] max-h-[460px] overflow-auto rounded border border-indigo-200 bg-slate-50 p-3 text-xs whitespace-pre-wrap">
+                  {(strDraftNotesById[strDraftModalAlertId] || '').trim()
+                    ? (strDraftNotesById[strDraftModalAlertId] || '').trim()
+                    : (strPreviewById[strDraftModalAlertId] || []).length > 0
+                    ? (strPreviewById[strDraftModalAlertId] || []).join('\n\n')
+                    : 'No preview loaded yet. Click "Refresh preview".'}
+                </div>
+              </div>
+            </div>
+            {strDraftModalError ? (
+              <p className="mt-3 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">
+                {strDraftModalError}
+              </p>
+            ) : null}
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setStrDraftModalAlertId(null);
+                  setCoAiHelperOpen(false);
+                  setCoAiInstruction('');
+                  setCoAiRefineBusy(false);
+                  setCoAiInlineMsg(null);
+                }}
+                className="px-4 py-2 text-sm rounded-lg border border-slate-300 bg-white hover:bg-slate-50"
+              >
+                Close
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCoAiHelperOpen((v) => !v)}
+              className="absolute bottom-4 right-4 h-12 w-12 rounded-full bg-indigo-600 text-white shadow-lg hover:bg-indigo-700"
+              title="AI reporting helper"
+              aria-label="Open AI reporting helper"
+            >
+              AI
+            </button>
+            {coAiHelperOpen && (
+              <div className="absolute bottom-20 right-4 w-[380px] max-w-[90vw] rounded-lg border border-indigo-200 bg-white shadow-xl p-3 z-10">
+                <p className="text-xs font-semibold text-slate-800 mb-1">AI reporting helper</p>
+                <p className="text-[11px] text-slate-500 mb-2">
+                  Type your instruction, then copy the composed prompt to your AI chat tool.
+                </p>
+                <textarea
+                  value={coAiInstruction}
+                  onChange={(e) => {
+                    setCoAiInstruction(e.target.value);
+                    if (coAiInlineMsg) setCoAiInlineMsg(null);
+                  }}
+                  rows={3}
+                  placeholder="Example: Make this STR concise, plain-English, and suitable for NFIU filing."
+                  className="w-full rounded border border-slate-300 px-2 py-1.5 text-xs"
+                />
+                <div className="mt-2 max-h-36 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 text-[11px] whitespace-pre-wrap">
+                  {coAiComposedPrompt}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    disabled={coAiRefineBusy || !strDraftModalAlertId || !(strDraftNotesById[strDraftModalAlertId] || '').trim()}
+                    onClick={async () => {
+                      if (!strDraftModalAlertId) return;
+                      const aid = strDraftModalAlertId;
+                      const draft = (strDraftNotesById[aid] || '').trim();
+                      if (!draft) return;
+                      setCoAiRefineBusy(true);
+                      setCoAiInlineMsg(null);
+                      try {
+                        const res = await aiApi.refineReport({
+                          alert_id: aid,
+                          draft_text: draft,
+                          instruction: coAiInstruction.trim() || undefined,
+                        });
+                        const refined = (res.refined_text || '').trim();
+                        if (refined) {
+                          setStrDraftNotesById((prev) => ({ ...prev, [aid]: refined }));
+                          setCoAiInlineMsg({
+                            type: 'success',
+                            text: `Report refined using ${res.provider}/${res.model}. Review and save draft edits.`,
+                          });
+                        } else {
+                          setCoAiInlineMsg({ type: 'error', text: 'AI returned empty text.' });
+                        }
+                      } catch (e) {
+                        setCoAiInlineMsg({
+                          type: 'error',
+                          text: e instanceof Error ? e.message : 'AI refinement failed.',
+                        });
+                      } finally {
+                        setCoAiRefineBusy(false);
+                      }
+                    }}
+                    className="px-2.5 py-1 text-xs rounded bg-indigo-600 text-white"
+                  >
+                    {coAiRefineBusy ? 'Refining…' : 'Refine report'}
+                  </button>
+                </div>
+                {coAiInlineMsg ? (
+                  <p className={`mt-1 text-[11px] ${coAiInlineMsg.type === 'error' ? 'text-rose-700' : 'text-emerald-700'}`}>
+                    {coAiInlineMsg.text}
+                  </p>
+                ) : null}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {showSarModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
@@ -1709,6 +2287,7 @@ export default function Reports() {
                         <th className="p-2">Risk</th>
                         <th className="p-2">Summary</th>
                         <th className="p-2">Customer</th>
+                        <th className="p-2">Channel</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1730,7 +2309,8 @@ export default function Reports() {
                             </td>
                             <td className="p-2">{(r.severity * 100).toFixed(0)}%</td>
                             <td className="p-2 max-w-[220px] truncate">{r.summary ?? '—'}</td>
-                            <td className="p-2 font-mono text-xs">{r.customer_id}</td>
+                            <td className="p-2 text-xs">{String(r.customer_name || '').trim() || r.customer_id}</td>
+                            <td className="p-2 text-xs">{displayChannel(r.linked_channel) || '—'}</td>
                           </tr>
                         );
                       })}
@@ -1764,6 +2344,146 @@ export default function Reports() {
                   : sarModalSelectedIds.length > 1
                     ? `Generate ${sarModalSelectedIds.length} SARs`
                     : 'Generate SAR'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {otcWordDraftModalAlertId && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/50"
+          onClick={() =>
+            !otcWordDraftBusyById[otcWordDraftModalAlertId] &&
+            !otcWordDraftSaveBusyById[otcWordDraftModalAlertId] &&
+            setOtcWordDraftModalAlertId(null)
+          }
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="co-otc-word-draft-title"
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl max-w-6xl w-full p-6 max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="co-otc-word-draft-title" className="text-lg font-semibold text-slate-900 mb-2">
+              OTC {otcWordDraftKind === 'otc_esar' ? 'ESAR' : 'ESTR'} draft editor (CO)
+            </h2>
+            <p className="text-xs text-slate-600 mb-3 font-mono">Alert: {otcWordDraftModalAlertId}</p>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div>
+                <p className="text-xs font-semibold text-slate-700 mb-1">Editor (extension / reasons narrative)</p>
+                <textarea
+                  value={otcWordDraftNotesById[otcWordDraftModalAlertId] ?? ''}
+                  onChange={(e) =>
+                    setOtcWordDraftNotesById((prev) => ({
+                      ...prev,
+                      [otcWordDraftModalAlertId]: e.target.value,
+                    }))
+                  }
+                  rows={14}
+                  placeholder="Edit notes used for OTC Word preview and official generation…"
+                  className="w-full rounded border border-slate-300 px-3 py-2 text-sm bg-white"
+                />
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={!!otcWordDraftBusyById[otcWordDraftModalAlertId]}
+                    onClick={async () => {
+                      const aid = otcWordDraftModalAlertId;
+                      if (!aid) return;
+                      setOtcWordDraftBusy(aid, true);
+                      try {
+                        const res = await reportsApi.getOtcWordDraftPreview(aid);
+                        setOtcWordDraftModalError(res.preview_warning ? res.preview_warning : null);
+                        setOtcWordDraftNotesById((prev) => ({ ...prev, [aid]: editorTextFromOtcWordPreview(res) }));
+                        setOtcWordPreviewById((prev) => ({ ...prev, [aid]: res.word_preview_lines || [] }));
+                      } catch (e) {
+                        setOtcWordDraftModalError(e instanceof Error ? e.message : 'Could not refresh OTC draft preview.');
+                      } finally {
+                        setOtcWordDraftBusy(aid, false);
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-slate-700 text-white disabled:opacity-50"
+                  >
+                    {otcWordDraftBusyById[otcWordDraftModalAlertId] ? 'Refreshing…' : 'Refresh preview'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      !!otcWordDraftBusyById[otcWordDraftModalAlertId] ||
+                      !!otcWordDraftSaveBusyById[otcWordDraftModalAlertId] ||
+                      !(otcWordDraftNotesById[otcWordDraftModalAlertId] || '').trim()
+                    }
+                    onClick={async () => {
+                      const aid = otcWordDraftModalAlertId;
+                      if (!aid) return;
+                      const v = (otcWordDraftNotesById[aid] || '').trim();
+                      if (!v) return;
+                      setOtcWordDraftSaveBusyById((prev) => ({ ...prev, [aid]: true }));
+                      try {
+                        await reportsApi.saveOtcWordDraft(aid, { estr_notes: v });
+                        const res = await reportsApi.getOtcWordDraftPreview(aid);
+                        setOtcWordPreviewById((prev) => ({ ...prev, [aid]: res.word_preview_lines || [] }));
+                        setOtcWordDraftSavedById((prev) => ({ ...prev, [aid]: true }));
+                        setOtcWordDraftModalError(res.preview_warning ? res.preview_warning : null);
+                      } catch (e) {
+                        setOtcWordDraftModalError(e instanceof Error ? e.message : 'Could not save OTC draft edits.');
+                      } finally {
+                        setOtcWordDraftSaveBusyById((prev) => ({ ...prev, [aid]: false }));
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-emerald-600 text-white disabled:opacity-50"
+                  >
+                    {otcWordDraftSaveBusyById[otcWordDraftModalAlertId] ? 'Saving…' : 'Save draft edits'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!!otcWordDraftDownloadBusyById[otcWordDraftModalAlertId]}
+                    onClick={async () => {
+                      const aid = otcWordDraftModalAlertId;
+                      if (!aid) return;
+                      setOtcWordDraftDownloadBusyById((prev) => ({ ...prev, [aid]: true }));
+                      try {
+                        await reportsApi.downloadOtcWordDraftPreview(aid);
+                        setOtcWordDraftModalError(null);
+                      } catch (e) {
+                        setOtcWordDraftModalError(e instanceof Error ? e.message : 'Could not download preview.');
+                      } finally {
+                        setOtcWordDraftDownloadBusyById((prev) => ({ ...prev, [aid]: false }));
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded bg-violet-700 text-white disabled:opacity-50"
+                  >
+                    {otcWordDraftDownloadBusyById[otcWordDraftModalAlertId]
+                      ? 'Downloading…'
+                      : 'Download preview (.docx)'}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-slate-700 mb-1">Word preview</p>
+                <div className="h-full min-h-[290px] max-h-[460px] overflow-auto rounded border border-slate-200 bg-slate-50 p-3 text-xs whitespace-pre-wrap">
+                  {(otcWordDraftNotesById[otcWordDraftModalAlertId] || '').trim()
+                    ? (otcWordDraftNotesById[otcWordDraftModalAlertId] || '').trim()
+                    : (otcWordPreviewById[otcWordDraftModalAlertId] || []).length > 0
+                    ? (otcWordPreviewById[otcWordDraftModalAlertId] || []).join('\n\n')
+                    : 'No preview loaded yet. Click "Refresh preview".'}
+                </div>
+              </div>
+            </div>
+            {otcWordDraftModalError ? (
+              <p className="mt-3 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1">
+                {otcWordDraftModalError}
+              </p>
+            ) : null}
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setOtcWordDraftModalAlertId(null)}
+                className="px-4 py-2 text-sm rounded-lg border border-slate-300 bg-white hover:bg-slate-50"
+              >
+                Close
               </button>
             </div>
           </div>
@@ -1853,6 +2573,8 @@ export default function Reports() {
                         <th className="p-2">Summary</th>
                         <th className="p-2">Subject</th>
                         <th className="p-2">Customer</th>
+                        <th className="p-2">Channel</th>
+                        <th className="p-2 w-[120px]">Word draft</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1875,7 +2597,45 @@ export default function Reports() {
                             <td className="p-2">{(r.severity * 100).toFixed(0)}%</td>
                             <td className="p-2 max-w-[180px] truncate">{r.summary ?? '—'}</td>
                             <td className="p-2 max-w-[140px] truncate text-xs">{r.otc_subject ?? '—'}</td>
-                            <td className="p-2 font-mono text-xs">{r.customer_id}</td>
+                            <td className="p-2 text-xs">{String(r.customer_name || '').trim() || r.customer_id}</td>
+                            <td className="p-2 text-xs">{displayChannel(r.linked_channel) || '—'}</td>
+                            <td className="p-2 align-top" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex flex-col gap-1">
+                                <button
+                                  type="button"
+                                  disabled={!!otcWordDraftBusyById[r.alert_id]}
+                                  onClick={async () => {
+                                    setOtcWordDraftModalAlertId(r.alert_id);
+                                    setOtcWordDraftKind('otc_esar');
+                                    setOtcWordDraftBusy(r.alert_id, true);
+                                    try {
+                                      const res = await reportsApi.getOtcWordDraftPreview(r.alert_id);
+                                      setOtcWordDraftModalError(res.preview_warning ? res.preview_warning : null);
+                                      setOtcWordDraftNotesById((prev) => ({
+                                        ...prev,
+                                        [r.alert_id]: editorTextFromOtcWordPreview(res),
+                                      }));
+                                      setOtcWordPreviewById((prev) => ({
+                                        ...prev,
+                                        [r.alert_id]: res.word_preview_lines || [],
+                                      }));
+                                    } catch (e) {
+                                      setOtcWordDraftModalError(
+                                        e instanceof Error ? e.message : 'Could not load OTC draft preview.'
+                                      );
+                                    } finally {
+                                      setOtcWordDraftBusy(r.alert_id, false);
+                                    }
+                                  }}
+                                  className="px-2 py-1 text-[11px] rounded bg-violet-600 text-white disabled:opacity-50 whitespace-nowrap"
+                                >
+                                  {otcWordDraftBusyById[r.alert_id] ? 'Loading…' : 'Load preview'}
+                                </button>
+                                {otcWordDraftSavedById[r.alert_id] ? (
+                                  <span className="text-[10px] text-emerald-700 font-medium">Draft saved</span>
+                                ) : null}
+                              </div>
+                            </td>
                           </tr>
                         );
                       })}
@@ -1990,6 +2750,8 @@ export default function Reports() {
                     <th className="p-2">Subject</th>
                     <th className="p-2">Summary</th>
                     <th className="p-2">Customer</th>
+                    <th className="p-2">Channel</th>
+                    <th className="p-2 w-[120px]">Word draft</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -2013,7 +2775,45 @@ export default function Reports() {
                         <td className="p-2 text-xs">Cash → ESTR</td>
                         <td className="p-2 text-xs font-mono">{(r.otc_subject ?? '—').replace(/_/g, ' ')}</td>
                         <td className="p-2 max-w-[180px] truncate">{r.summary ?? '—'}</td>
-                        <td className="p-2 font-mono text-xs">{r.customer_id}</td>
+                        <td className="p-2 text-xs">{String(r.customer_name || '').trim() || r.customer_id}</td>
+                        <td className="p-2 text-xs">{displayChannel(r.linked_channel) || '—'}</td>
+                        <td className="p-2 align-top" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex flex-col gap-1">
+                            <button
+                              type="button"
+                              disabled={!!otcWordDraftBusyById[r.alert_id]}
+                              onClick={async () => {
+                                setOtcWordDraftModalAlertId(r.alert_id);
+                                setOtcWordDraftKind('otc_estr');
+                                setOtcWordDraftBusy(r.alert_id, true);
+                                try {
+                                  const res = await reportsApi.getOtcWordDraftPreview(r.alert_id);
+                                  setOtcWordDraftModalError(res.preview_warning ? res.preview_warning : null);
+                                  setOtcWordDraftNotesById((prev) => ({
+                                    ...prev,
+                                    [r.alert_id]: editorTextFromOtcWordPreview(res),
+                                  }));
+                                  setOtcWordPreviewById((prev) => ({
+                                    ...prev,
+                                    [r.alert_id]: res.word_preview_lines || [],
+                                  }));
+                                } catch (e) {
+                                  setOtcWordDraftModalError(
+                                    e instanceof Error ? e.message : 'Could not load OTC draft preview.'
+                                  );
+                                } finally {
+                                  setOtcWordDraftBusy(r.alert_id, false);
+                                }
+                              }}
+                              className="px-2 py-1 text-[11px] rounded bg-amber-700 text-white disabled:opacity-50 whitespace-nowrap"
+                            >
+                              {otcWordDraftBusyById[r.alert_id] ? 'Loading…' : 'Load preview'}
+                            </button>
+                            {otcWordDraftSavedById[r.alert_id] ? (
+                              <span className="text-[10px] text-emerald-700 font-medium">Draft saved</span>
+                            ) : null}
+                          </div>
+                        </td>
                       </tr>
                     );
                   })}

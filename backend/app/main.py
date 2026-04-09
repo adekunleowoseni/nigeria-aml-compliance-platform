@@ -49,6 +49,7 @@ from app.services.aop_upload_db import ensure_aml_customer_aop_upload_table
 from app.services.audit_trail import configure_from_settings, shutdown_audit_storage
 from app.services.audit_events_schema import ensure_audit_events_schema
 from app.services.customer_kyc_db import ensure_aml_customer_kyc_table
+from app.services.customer_risk_review_db import ensure_customer_risk_review_schema
 from app.services.closed_case_reviews_db import ensure_closed_case_reviews_schema
 from app.services.ftr_reports_db import ensure_ftr_reports_schema
 from app.services.retention_policies_db import ensure_retention_schema
@@ -74,6 +75,10 @@ async def startup_event(app: FastAPI) -> None:
         await ensure_aml_customer_kyc_table(app.state.pg)
     except Exception:
         log.exception("aml_customer_kyc_schema_failed")
+    try:
+        await ensure_customer_risk_review_schema(app.state.pg)
+    except Exception:
+        log.exception("aml_customer_risk_review_schema_failed")
     try:
         await ensure_retention_schema(app.state.pg)
     except Exception:

@@ -32,7 +32,7 @@ export default function Compliance() {
             to="/compliance/closed-case-reviews"
             className="text-blue-700 font-medium hover:underline"
           >
-            Closed case review (CBN 5.7.b.ii)
+            Closed case review
           </Link>
           <span className="text-slate-600 text-sm ml-2">— periodic sampling of closed alerts and tuning proposals.</span>
         </p>

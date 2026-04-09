@@ -12,6 +12,10 @@ function isOtcEstrAlert(a: Pick<Alert, 'otc_report_kind'> | null | undefined): b
   return a?.otc_report_kind === 'otc_estr';
 }
 
+function isOtcEsarAlert(a: Pick<Alert, 'otc_report_kind'> | null | undefined): boolean {
+  return a?.otc_report_kind === 'otc_esar';
+}
+
 /** OTC extended returns: supporting PDF excludes AOP package; AOP downloads separately. */
 function isOtcExtendedReturnAlert(a: Pick<Alert, 'otc_report_kind'> | null | undefined): boolean {
   return a?.otc_report_kind === 'otc_estr' || a?.otc_report_kind === 'otc_esar';
@@ -44,10 +48,10 @@ export default function Alerts() {
   const [notifyCcoWithAction, setNotifyCcoWithAction] = useState(false);
   const [ccoExtraRecipient, setCcoExtraRecipient] = useState('');
   const [workflowBusy, setWorkflowBusy] = useState(false);
-  const [otcEstrRefinementNotes, setOtcEstrRefinementNotes] = useState('');
+  const [otcExtendedRefinementNotes, setOtcExtendedRefinementNotes] = useState('');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [riskSortFirst, setRiskSortFirst] = useState(true);
-  const [alertsTab, setAlertsTab] = useState<'all' | 'otc_estr'>('all');
+  const [alertsTab, setAlertsTab] = useState<'core' | 'otc_estr' | 'otc_esar'>('core');
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
   const [statusFilter, setStatusFilter] = useState('');
@@ -65,7 +69,7 @@ export default function Alerts() {
 
   const skip = page * pageSize;
   const sort = riskSortFirst ? 'risk' : 'newest';
-  const queueParam = alertsTab === 'otc_estr' ? ('otc_estr' as const) : undefined;
+  const queueParam = alertsTab;
 
   const listQuery = useQuery({
     queryKey: ['alerts', 'list', skip, pageSize, statusFilter, severityFilter, sort, alertsTab],
@@ -125,7 +129,7 @@ export default function Alerts() {
     setCcoExtraRecipient('');
     setEscalateReason('');
     setEscalationType('cco_review');
-    setOtcEstrRefinementNotes('');
+    setOtcExtendedRefinementNotes('');
   }, [selectedId]);
 
   function openAlertActionModal(alertId: string) {
@@ -218,11 +222,14 @@ export default function Alerts() {
 
   const OTC_ESTR_ESCALATE_DEFAULT_REASON =
     'OTC ESTR (cash) — escalate for Chief Compliance Officer review and approval before extended return generation on Regulatory Reports.';
+  const OTC_ESAR_ESCALATE_DEFAULT_REASON =
+    'OTC ESAR (activity / customer-information change) — escalate for Chief Compliance Officer review and approval before ESAR generation on Regulatory Reports.';
 
-  const handleOtcEstrEscalate = async () => {
+  const handleOtcExtendedEscalate = async () => {
     if (!selectedId) return;
     const alertId = selectedId;
-    const reason = otcEstrRefinementNotes.trim() || OTC_ESTR_ESCALATE_DEFAULT_REASON;
+    const isEsar = isOtcEsarAlert(alert);
+    const reason = otcExtendedRefinementNotes.trim() || (isEsar ? OTC_ESAR_ESCALATE_DEFAULT_REASON : OTC_ESTR_ESCALATE_DEFAULT_REASON);
     setWorkflowBusy(true);
     setMessage(null);
     try {
@@ -242,7 +249,7 @@ export default function Alerts() {
           escRes.cco_notification_detail ||
           'Escalated. The CCO must approve OTC reporting on CCO review before Regulatory Reports lists this alert for ESTR.',
       });
-      setOtcEstrRefinementNotes('');
+      setOtcExtendedRefinementNotes('');
       setSelectedId(null);
       const a = (list?.items ?? []).find((x) => x.id === alertId);
       setLastAction({
@@ -270,6 +277,19 @@ export default function Alerts() {
     }
     return 'RESOLVE_FALSE_POSITIVE';
   }, [actionTab, escalationType]);
+
+  const displayCustomer = (a: Pick<Alert, 'customer_name' | 'customer_id'>) =>
+    String(a.customer_name || '').trim() || a.customer_id;
+  const displayChannel = (a: Pick<Alert, 'linked_channel'>) => {
+    const raw = String(a.linked_channel || '').trim();
+    if (!raw) return '';
+    const norm = raw.toLowerCase();
+    if (norm === 'pos' || norm === 'pos_terminal') return 'POS terminal';
+    if (norm === 'atm') return 'ATM';
+    if (norm === 'otc_branch') return 'OTC branch';
+    if (norm === 'nibss_nip' || norm === 'nibss') return 'NIBSS/NIP';
+    return raw.replace(/_/g, ' ');
+  };
 
   const handleInvestigate = async () => {
     if (!selectedId || !investigatorId.trim()) return;
@@ -472,15 +492,15 @@ export default function Alerts() {
         <button
           type="button"
           role="tab"
-          aria-selected={alertsTab === 'all'}
-          onClick={() => setAlertsTab('all')}
+          aria-selected={alertsTab === 'core'}
+          onClick={() => setAlertsTab('core')}
           className={`px-4 py-2 text-sm font-medium rounded-lg border ${
-            alertsTab === 'all'
+            alertsTab === 'core'
               ? 'bg-slate-800 text-white border-slate-800'
               : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
           }`}
         >
-          All alerts
+          Alert tab
         </button>
         <button
           type="button"
@@ -493,7 +513,20 @@ export default function Alerts() {
               : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
           }`}
         >
-          OTC / ESTR alerts
+          OTC ESTR alerts
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={alertsTab === 'otc_esar'}
+          onClick={() => setAlertsTab('otc_esar')}
+          className={`px-4 py-2 text-sm font-medium rounded-lg border ${
+            alertsTab === 'otc_esar'
+              ? 'bg-cyan-800 text-white border-cyan-800'
+              : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+          }`}
+        >
+          OTC ESAR alerts
         </button>
       </div>
       <p className="text-sm text-slate-600 mb-4 max-w-3xl">
@@ -505,10 +538,17 @@ export default function Alerts() {
             <strong>Regulatory Reports → Generate OTC ESTR</strong>. Email to the CCO runs when <span className="font-mono">SMTP</span>{' '}
             and <span className="font-mono">CCO_EMAIL</span> are set.
           </>
+        ) : alertsTab === 'otc_esar' ? (
+          <>
+            <strong>OTC ESAR</strong> (identity/profile change): shows partial/full name change and related customer-information
+            matters on the OTC path. After a <strong>true-positive</strong> OTC filing, compliance <strong>escalates</strong> and
+            CCO approves OTC reporting before <strong>Regulatory Reports → Generate OTC ESAR</strong>.
+          </>
         ) : (
           <>
-            Select any alert and choose <strong>Take action</strong> to review details and snapshot, then investigate, resolve,
-            or escalate as needed.
+            Main alert tab shows transaction-led alerts such as <strong>transfer in</strong> and <strong>transfer out</strong>.
+            Select any alert and choose <strong>Take action</strong> to review details and snapshot, then investigate, resolve, or
+            escalate as needed.
           </>
         )}
       </p>
@@ -681,10 +721,18 @@ export default function Alerts() {
                   <div className="flex-1 min-w-0">
                     <p className="font-medium text-slate-900">{a.summary ?? 'Suspicious activity'}</p>
                     <p className="text-sm text-slate-500 mt-1">
-                      Customer: {a.customer_id} · Txn: {a.transaction_id}
+                      Customer: {displayCustomer(a)} · Txn: {a.transaction_id}
                       {a.linked_transaction_type ? (
                         <span className="ml-1 text-xs font-mono text-slate-400">
                           · {String(a.linked_transaction_type).replace(/_/g, ' ')}
+                        </span>
+                      ) : null}
+                      {displayChannel(a) ? (
+                        <span className="ml-1 text-xs text-slate-500">· Channel: {displayChannel(a)}</span>
+                      ) : null}
+                      {Number(a.linked_accounts_count ?? 0) > 1 ? (
+                        <span className="ml-1 text-xs text-indigo-700 font-medium">
+                          · {a.linked_accounts_count} linked accounts involved
                         </span>
                       ) : null}
                     </p>
@@ -922,10 +970,22 @@ export default function Alerts() {
                           <dt className="text-slate-500">Transaction ID</dt>
                           <dd className="font-mono">{alert.transaction_id}</dd>
                         </div>
+                        {displayChannel(alert) ? (
+                          <div>
+                            <dt className="text-slate-500">Channel</dt>
+                            <dd>{displayChannel(alert)}</dd>
+                          </div>
+                        ) : null}
                         <div>
                           <dt className="text-slate-500">Customer</dt>
-                          <dd>{alert.customer_id}</dd>
+                          <dd>{displayCustomer(alert)}</dd>
                         </div>
+                        {alert.primary_account_number ? (
+                          <div>
+                            <dt className="text-slate-500">Primary account (STR basis)</dt>
+                            <dd className="font-mono text-xs">{alert.primary_account_number}</dd>
+                          </div>
+                        ) : null}
                       </>
                     )}
                     <div>
@@ -1026,20 +1086,72 @@ export default function Alerts() {
                     )}
                   </dl>
 
-                  {isOtcEstrAlert(alert) && (alert.status || '').toLowerCase() !== 'rejected' && (
+                  {(alert.linked_accounts_count ?? 0) > 1 && (
+                    <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-4">
+                      <h3 className="text-sm font-semibold text-indigo-900 mb-2">
+                        Linked accounts involved in this suspicious activity
+                      </h3>
+                      <ul className="list-disc list-inside text-xs text-indigo-900 space-y-1">
+                        {(alert.linked_accounts ?? []).map((acc, i) => (
+                          <li key={`${acc.customer_id || 'cid'}:${acc.account_number || i}`}>
+                            <span className="font-mono">{acc.account_number || '—'}</span> ·{' '}
+                            {acc.customer_name || acc.customer_id || 'Customer'}
+                          </li>
+                        ))}
+                      </ul>
+                      {(alert.related_transactions ?? []).length > 0 && (
+                        <div className="mt-3">
+                          <p className="text-xs font-semibold text-indigo-900 mb-2">
+                            Related transactions across linked accounts
+                          </p>
+                          <div className="max-h-48 overflow-auto rounded border border-indigo-200 bg-white">
+                            <table className="w-full text-xs">
+                              <thead className="bg-indigo-50 text-left text-indigo-900">
+                                <tr>
+                                  <th className="p-2">Txn</th>
+                                  <th className="p-2">Type</th>
+                                  <th className="p-2">Amount</th>
+                                  <th className="p-2">From</th>
+                                  <th className="p-2">To</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(alert.related_transactions ?? []).slice(0, 20).map((tx, i) => (
+                                  <tr key={`${tx.transaction_id || i}`} className="border-t border-indigo-100">
+                                    <td className="p-2 font-mono">{tx.transaction_id || '—'}</td>
+                                    <td className="p-2">{String(tx.transaction_type || '').replace(/_/g, ' ') || '—'}</td>
+                                    <td className="p-2">
+                                      {tx.currency || 'NGN'} {Number(tx.amount || 0).toLocaleString('en-NG')}
+                                    </td>
+                                    <td className="p-2 font-mono">{tx.from_account || '—'}</td>
+                                    <td className="p-2 font-mono">{tx.to_account || '—'}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {isOtcExtendedReturnAlert(alert) && (alert.status || '').toLowerCase() !== 'rejected' && (
                     <div className="rounded-lg border border-cyan-200 bg-cyan-50/50 p-4 space-y-3">
                       <h3 className="text-sm font-semibold text-slate-900">
-                        OTC extended return (ESTR){alert.walk_in_otc ? ' · walk-in' : ''}
+                        OTC extended return ({isOtcEsarAlert(alert) ? 'ESAR' : 'ESTR'})
+                        {alert.walk_in_otc ? ' · walk-in' : ''}
                       </h3>
                       <p className="text-xs text-slate-600">
                         <strong>Do not generate the Word pack from this screen.</strong> After true-positive OTC filing,{' '}
                         <strong>escalate</strong> so the Chief Compliance Officer can approve OTC reporting. Then use{' '}
-                        <strong>Regulatory Reports → Generate OTC ESTR</strong>.
+                        <strong>
+                          Regulatory Reports → {isOtcEsarAlert(alert) ? 'Generate OTC ESAR' : 'Generate OTC ESTR'}
+                        </strong>.
                       </p>
                       {alert.otc_outcome !== 'true_positive' && (
                         <div className="text-xs text-amber-950 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                          Record this matter as a <strong>true-positive OTC</strong> filing before any extended return can be
-                          drafted.
+                          Record this matter as a <strong>true-positive OTC</strong> filing before any{' '}
+                          {isOtcEsarAlert(alert) ? 'OTC ESAR' : 'extended return'} can be drafted.
                           <button
                             type="button"
                             onClick={() => navigate('/cco-review')}
@@ -1052,10 +1164,14 @@ export default function Alerts() {
                       <label className="block text-sm font-medium text-slate-700">
                         Optional notes for the Chief Compliance Officer (included in escalation)
                         <textarea
-                          value={otcEstrRefinementNotes}
-                          onChange={(e) => setOtcEstrRefinementNotes(e.target.value)}
+                          value={otcExtendedRefinementNotes}
+                          onChange={(e) => setOtcExtendedRefinementNotes(e.target.value)}
                           rows={3}
-                          placeholder="e.g. Request review of cash threshold breach and branch referral; facts on file in snapshot."
+                          placeholder={
+                            isOtcEsarAlert(alert)
+                              ? 'e.g. Request review of customer-information change activity and profile inconsistencies; facts on file in snapshot.'
+                              : 'e.g. Request review of cash threshold breach and branch referral; facts on file in snapshot.'
+                          }
                           className="mt-1 block w-full rounded border border-slate-300 px-3 py-2 text-sm"
                         />
                       </label>
@@ -1064,26 +1180,27 @@ export default function Alerts() {
                         onClick={() => {
                           if (!selectedId || workflowBusy) return;
                           setMessage(null);
-                          void handleOtcEstrEscalate();
+                          void handleOtcExtendedEscalate();
                         }}
                         disabled={!selectedId || workflowBusy || escalateMutation.isPending}
                         className="px-4 py-2 text-sm font-medium rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {workflowBusy || escalateMutation.isPending
                           ? 'Escalating…'
-                          : 'Escalate to CCO (required before ESTR generation)'}
+                          : `Escalate to CCO (required before ${isOtcEsarAlert(alert) ? 'ESAR' : 'ESTR'} generation)`}
                       </button>
                     </div>
                   )}
 
-                  {(alert.status || '').toLowerCase() === 'rejected' && isOtcEstrAlert(alert) && (
+                  {(alert.status || '').toLowerCase() === 'rejected' && isOtcExtendedReturnAlert(alert) && (
                     <p className="text-sm text-rose-800 bg-rose-50 border border-rose-200 rounded-lg px-3 py-2">
-                      This OTC alert was <strong>rejected</strong> by the CCO. Escalation and regulatory actions are
-                      unavailable until you use <strong>Reset workflow</strong> if appropriate.
+                      This OTC {isOtcEsarAlert(alert) ? 'ESAR' : 'ESTR'} alert was <strong>rejected</strong> by the CCO.
+                      Escalation and regulatory actions are unavailable until you use <strong>Reset workflow</strong> if
+                      appropriate.
                     </p>
                   )}
 
-                  {!isOtcEstrAlert(alert) && (alert.status || '').toLowerCase() !== 'rejected' && (
+                  {!isOtcExtendedReturnAlert(alert) && (alert.status || '').toLowerCase() !== 'rejected' && (
                   <div className="pt-4 border-t border-slate-200">
                     <h3 className="text-sm font-semibold text-slate-900 mb-2">Compliance actions (pre-resolution)</h3>
                     <p className="text-xs text-slate-600 mb-3">

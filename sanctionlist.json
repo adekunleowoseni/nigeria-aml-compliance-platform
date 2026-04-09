@@ -1,22 +1,178 @@
 [
   {
     "entity_id": "SANC-001-NG",
-    "name": "Ibrahim Al-Zubair",
-    "aliases": ["Abu Ibrahim", "I. Zubair"],
-    "date_of_birth": "1978-11-15",
+    "name": "Blessing Bello",
+    "aliases": ["B. Bello", "Bello Blessing"],
+    "date_of_birth": "1982-04-12",
     "nationality": "Nigeria",
     "sanction_source": "OFAC Specially Designated Nationals (SDN)",
-    "reason": "Terrorism Financing - Linked to insurgent groups",
+    "reason": "Drug trafficking and money laundering linked to transnational cartel",
     "status": "Active",
-    "last_updated": "2024-02-10"
+    "last_updated": "2025-03-15"
   },
   {
-    "entity_id": "SANC-002-CORP",
-    "name": "Oceanic Global Logistics Ltd",
-    "registration_number": "RC123456",
-    "jurisdiction": "Panama",
+    "entity_id": "SANC-002-NG",
+    "name": "Blessing Eze",
+    "aliases": ["Eze Blessing", "B. Eze"],
+    "date_of_birth": "1975-08-23",
+    "nationality": "Nigeria",
+    "sanction_source": "UN Security Council Resolution 2610",
+    "reason": "Financial support to Boko Haram insurgent network",
+    "status": "Active",
+    "last_updated": "2025-02-10"
+  },
+  {
+    "entity_id": "SANC-003-NG",
+    "name": "Blessing Ibrahim",
+    "aliases": ["Ibrahim Blessing", "Hajia B. Ibrahim"],
+    "date_of_birth": "1970-11-01",
+    "nationality": "Nigeria",
     "sanction_source": "EU Consolidated Financial Sanctions",
-    "reason": "Money Laundering / Sanction Evasion",
-    "status": "Active"
+    "reason": "Corruption and embezzlement of public funds (state governor's aide)",
+    "status": "Active",
+    "last_updated": "2024-12-01"
+  },
+  {
+    "entity_id": "SANC-004-NG",
+    "name": "Blessing Lawal",
+    "aliases": ["Lawal Blessing", "B. Lawal"],
+    "date_of_birth": "1988-06-19",
+    "nationality": "Nigeria",
+    "sanction_source": "UK Office of Financial Sanctions Implementation (OFSI)",
+    "reason": "Cybercrime and ransomware payments laundering",
+    "status": "Active",
+    "last_updated": "2025-01-22"
+  },
+  {
+    "entity_id": "SANC-005-NG",
+    "name": "Blessing Nnamdi",
+    "aliases": ["Nnamdi Blessing", "Chief B. Nnamdi"],
+    "date_of_birth": "1965-03-30",
+    "nationality": "Nigeria",
+    "sanction_source": "Interpol Red Notice / UNSC",
+    "reason": "Illegal arms trafficking and mercenary activities",
+    "status": "Active",
+    "last_updated": "2024-11-05"
+  },
+  {
+    "entity_id": "SANC-006-NG",
+    "name": "Blessing Nwosu",
+    "aliases": ["Nwosu B.", "Blessing N."],
+    "date_of_birth": "1979-09-14",
+    "nationality": "Nigeria",
+    "sanction_source": "OFAC Non-SDN Menu-Based Sanctions List",
+    "reason": "Involvement in crude oil theft and illegal bunkering",
+    "status": "Active",
+    "last_updated": "2025-03-01"
+  },
+  {
+    "entity_id": "SANC-007-NG",
+    "name": "Blessing Ogunbiyi",
+    "aliases": ["Ogunbiyi Blessing", "B. Ogunbiyi"],
+    "date_of_birth": "1983-12-07",
+    "nationality": "Nigeria",
+    "sanction_source": "AU (African Union) Sanctions List",
+    "reason": "Human rights abuses during internal security operations",
+    "status": "Active",
+    "last_updated": "2024-10-18"
+  },
+  {
+    "entity_id": "SANC-008-NG",
+    "name": "Blessing Ogunleye",
+    "aliases": ["Ogunleye B.", "Blessing O."],
+    "date_of_birth": "1972-05-22",
+    "nationality": "Nigeria",
+    "sanction_source": "EU Consolidated List",
+    "reason": "Proliferation financing related to small arms smuggling",
+    "status": "Active",
+    "last_updated": "2025-02-28"
+  },
+  {
+    "entity_id": "SANC-009-NG",
+    "name": "Blessing Okechukwu",
+    "aliases": ["Okechukwu Blessing", "B. Okechukwu"],
+    "date_of_birth": "1990-07-11",
+    "nationality": "Nigeria",
+    "sanction_source": "US Department of State Counter-Terrorism Designation",
+    "reason": "Recruitment and funding for Islamist extremist cells",
+    "status": "Active",
+    "last_updated": "2025-03-10"
+  },
+  {
+    "entity_id": "SANC-010-NG",
+    "name": "Blessing Olatunji",
+    "aliases": ["Olatunji Blessing", "B. Olatunji"],
+    "date_of_birth": "1976-01-29",
+    "nationality": "Nigeria",
+    "sanction_source": "UK Sanctions List (Global Human Rights)",
+    "reason": "Complicity in extrajudicial killings and torture",
+    "status": "Active",
+    "last_updated": "2024-09-14"
+  },
+  {
+    "entity_id": "SANC-011-NG",
+    "name": "Blessing Onyeka",
+    "aliases": ["Onyeka Blessing", "B. Onyeka"],
+    "date_of_birth": "1985-10-03",
+    "nationality": "Nigeria",
+    "sanction_source": "UNSC Al-Qaida Sanctions Committee",
+    "reason": "Facilitating travel and finance for foreign terrorist fighters",
+    "status": "Active",
+    "last_updated": "2025-01-30"
+  },
+  {
+    "entity_id": "SANC-012-NG",
+    "name": "Blessing Suleiman",
+    "aliases": ["Suleiman Blessing", "B. Suleiman"],
+    "date_of_birth": "1968-02-17",
+    "nationality": "Nigeria",
+    "sanction_source": "OFAC SDN List",
+    "reason": "Major narcotics distribution network in West Africa",
+    "status": "Active",
+    "last_updated": "2025-02-05"
+  },
+  {
+    "entity_id": "SANC-013-NG",
+    "name": "Blessing Umeh",
+    "aliases": ["Umeh Blessing", "B. Umeh"],
+    "date_of_birth": "1981-04-25",
+    "nationality": "Nigeria",
+    "sanction_source": "EU Sanctions (Mali/Niger regime)",
+    "reason": "Gold smuggling and money laundering through informal channels",
+    "status": "Active",
+    "last_updated": "2024-12-12"
+  },
+  {
+    "entity_id": "SANC-014-NG",
+    "name": "Bola Abubakar",
+    "aliases": ["Abubakar Bola", "Bola A."],
+    "date_of_birth": "1973-06-09",
+    "nationality": "Nigeria",
+    "sanction_source": "World Bank Ineligible Firms & Individuals List",
+    "reason": "Procurement fraud and bribery in government contracts",
+    "status": "Active",
+    "last_updated": "2025-03-20"
+  },
+  {
+    "entity_id": "SANC-015-NG",
+    "name": "Bola Adeyemi",
+    "aliases": ["Adeyemi Bola", "Bola A."],
+    "date_of_birth": "1977-11-30",
+    "nationality": "Nigeria",
+    "sanction_source": "HM Treasury Financial Sanctions (UK)",
+    "reason": "Sanctions evasion using shell companies in multiple jurisdictions",
+    "status": "Active",
+    "last_updated": "2025-02-14"
+  },
+  {
+    "entity_id": "SANC-016-NG",
+    "name": "Bola Afolabi",
+    "aliases": ["Afolabi Bola", "B. Afolabi"],
+    "date_of_birth": "1980-08-19",
+    "nationality": "Nigeria",
+    "sanction_source": "OFAC SDN List",
+    "reason": "Involvement in kidnapping-for-ransom and hostage negotiations",
+    "status": "Active",
+    "last_updated": "2024-11-25"
   }
 ]

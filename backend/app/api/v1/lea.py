@@ -18,6 +18,8 @@ from app.services.mail_notify import (
     send_plain_email,
 )
 from app.services.mail_notify import _smtp_configured as smtp_configured
+from app.services.customer_kyc_db import fetch_customer_kyc_any
+from app.services.aop_upload_db import aop_upload_counts_for_customers
 from app.services.statement_of_account import (
     account_context_dates_for_customer,
     clamp_statement_period,
@@ -50,6 +52,89 @@ async def _account_context_dates(request: Request, customer_id: str) -> tuple[da
 def _public_rec(rec: Dict[str, Any]) -> Dict[str, Any]:
     """Omit nothing sensitive for demo; trim only internal."""
     return {k: v for k, v in rec.items() if not k.startswith("_")}
+
+
+async def _compose_lea_email_preview(
+    request: Request,
+    *,
+    customer_id: str,
+    agency: str,
+    recipient_email: str,
+    include_aop: bool,
+    period_start: Optional[str],
+    period_end: Optional[str],
+    workstation_mac: str,
+    internal_notes: str,
+    client_public_ip: str,
+    email_subject_override: str = "",
+    email_body_override: str = "",
+) -> Dict[str, Any]:
+    pg = getattr(request.app.state, "pg", None)
+    acc_start, acc_end, opened_s = await _account_context_dates(request, customer_id)
+    p_from = parse_iso_date(period_start) if period_start else None
+    p_to = parse_iso_date(period_end) if period_end else None
+    d_from, d_to = clamp_statement_period(acc_start, acc_end, p_from, p_to)
+    lines = statement_lines_for_customer(customer_id, d_from, d_to)
+    stmt = format_statement_text(lines, customer_id, opened_s)
+    kyc = await fetch_customer_kyc_any(pg, customer_id)
+    customer_name = str(getattr(kyc, "customer_name", "") or "").strip()
+    account_number = str(getattr(kyc, "account_number", "") or "").strip()
+    aop_on_file = False
+    if pg is not None:
+        try:
+            counts = await aop_upload_counts_for_customers(pg, [customer_id])
+            aop_on_file = int(counts.get(customer_id, 0)) > 0
+        except Exception:
+            aop_on_file = False
+    subj, body_text = build_lea_package_email(
+        agency=agency,
+        customer_id=customer_id,
+        period_start=d_from.isoformat(),
+        period_end=d_to.isoformat(),
+        statement_text=stmt,
+        aop_report_id="(to be generated on send)" if include_aop else None,
+        requester_ip=_client_ip(request),
+        workstation_mac=workstation_mac,
+        prepared_by="Compliance Officer",
+        bank_reference="PREVIEW",
+        client_public_ip=client_public_ip,
+    )
+    attachments = [
+        {
+            "name": f"Statement_of_Account_{customer_id}_{d_from.isoformat()}_{d_to.isoformat()}.txt",
+            "kind": "statement_of_account",
+            "generated": True,
+            "rows": len(lines),
+        }
+    ]
+    if include_aop:
+        attachments.append(
+            {
+                "name": f"AOP_{customer_id}.pdf",
+                "kind": "aop",
+                "generated": True,
+                "on_file": aop_on_file,
+            }
+        )
+    preview_subject = email_subject_override.strip() or subj
+    preview_body = email_body_override.strip() or body_text
+    return {
+        "customer_id": customer_id,
+        "customer_name": customer_name or None,
+        "account_number": account_number or None,
+        "recipient_email": recipient_email,
+        "period_start": d_from.isoformat(),
+        "period_end": d_to.isoformat(),
+        "account_opened_kyc": opened_s,
+        "include_aop": include_aop,
+        "aop_on_file": aop_on_file,
+        "statement_generated": True,
+        "statement_rows": len(lines),
+        "attachments": attachments,
+        "email_subject": preview_subject,
+        "email_body": preview_body,
+        "internal_notes": internal_notes,
+    }
 
 
 @router.get("/agencies")
@@ -135,6 +220,8 @@ async def create_lea_request(
         "approved_at": None,
         "aop_report_id": None,
         "sent_at": None,
+        "email_subject_override": str(payload.get("email_subject_override") or "").strip(),
+        "email_body_override": str(payload.get("email_body_override") or "").strip(),
     }
     _LEA_REQUESTS[rid] = rec
     audit_trail.record_event_from_user(
@@ -150,6 +237,40 @@ async def create_lea_request(
         await _notify_cco_for_lea(request, rec, user, analyst)
 
     return _public_rec(dict(_LEA_REQUESTS[rid]))
+
+
+@router.post("/preview")
+async def lea_request_preview(
+    request: Request,
+    payload: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    _ = user
+    customer_id = str(payload.get("customer_id") or "").strip()
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="customer_id is required")
+    agency = str(payload.get("agency") or "").strip().upper() or "EFCC"
+    if agency not in LEA_AGENCIES:
+        agency = "OTHER"
+    recipient_email = str(payload.get("recipient_email") or "").strip().lower() or "investigator@agency.gov.ng"
+    include_aop = bool(payload.get("include_aop", True))
+    workstation_mac = str(payload.get("workstation_mac") or "").strip()
+    internal_notes = str(payload.get("internal_notes") or "").strip()
+    client_public_ip = str(payload.get("client_public_ip") or "").strip()
+    return await _compose_lea_email_preview(
+        request,
+        customer_id=customer_id,
+        agency=agency,
+        recipient_email=recipient_email,
+        include_aop=include_aop,
+        period_start=str(payload.get("period_start") or "").strip() or None,
+        period_end=str(payload.get("period_end") or "").strip() or None,
+        workstation_mac=workstation_mac,
+        internal_notes=internal_notes,
+        client_public_ip=client_public_ip,
+        email_subject_override=str(payload.get("email_subject_override") or "").strip(),
+        email_body_override=str(payload.get("email_body_override") or "").strip(),
+    )
 
 
 async def _notify_cco_for_lea(request: Request, rec: Dict[str, Any], user: Dict[str, Any], analyst: str) -> None:
@@ -242,6 +363,7 @@ async def cco_approve_lea(
 @router.post("/requests/{request_id}/send")
 async def send_lea_package(
     request_id: str,
+    body: Dict[str, Any] = Body(default_factory=dict),
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
     rec = _LEA_REQUESTS.get(request_id)
@@ -297,6 +419,14 @@ async def send_lea_package(
         bank_reference=request_id,
         client_public_ip=str(rec.get("client_public_ip") or ""),
     )
+    subj_override = str(body.get("email_subject_override") or rec.get("email_subject_override") or "").strip()
+    body_override = str(body.get("email_body_override") or rec.get("email_body_override") or "").strip()
+    if subj_override:
+        subj = subj_override
+        rec["email_subject_override"] = subj_override
+    if body_override:
+        body_text = body_override
+        rec["email_body_override"] = body_override
     await send_plain_email([to_addr], subj, body_text)
 
     rec["status"] = "sent"

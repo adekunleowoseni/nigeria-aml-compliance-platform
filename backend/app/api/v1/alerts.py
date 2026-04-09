@@ -25,9 +25,11 @@ from app.models.alert import (
     InvestigationRequest,
     OtcReportSubmission,
     ResolutionRequest,
+    OTC_SUBJECTS_ESAR,
     otc_report_kind_for_subject,
 )
 from app.services.alert_snapshot import build_alert_snapshot
+from app.services.customer_kyc_db import fetch_customer_kyc_any, list_bvn_linked_accounts
 from app.api.v1.in_memory_stores import (
     _ALERTS,
     _TXNS,
@@ -79,31 +81,238 @@ def _last_officer_email_from_history(history: List[Dict[str, Any]]) -> Optional[
     return None
 
 
-def _enrich_alert_for_api(a: AlertResponse) -> AlertResponse:
+async def _enrich_alert_for_api(a: AlertResponse, pg: Any = None) -> AlertResponse:
     """Attach linked transaction hints for list/detail JSON (OTC / ESTR queue tab)."""
     tx = _TXNS.get(a.transaction_id)
+    customer_name = (a.customer_name or "").strip() or None
+    if not customer_name and tx and isinstance(tx.metadata, dict):
+        n0 = str(tx.metadata.get("customer_name") or "").strip()
+        customer_name = n0 or None
+    if not customer_name:
+        try:
+            kyc = await fetch_customer_kyc_any(pg, a.customer_id)
+            if kyc:
+                n1 = str(getattr(kyc, "customer_name", "") or "").strip()
+                customer_name = n1 or None
+        except Exception:
+            pass
     if not tx:
-        return a.model_copy(update={"linked_transaction_type": None, "walk_in_otc": False})
+        return a.model_copy(
+            update={
+                "linked_transaction_type": None,
+                "linked_channel": None,
+                "walk_in_otc": False,
+                "customer_name": customer_name,
+            }
+        )
     md = tx.metadata if isinstance(tx.metadata, dict) else {}
-    walk = md.get("walk_in") is True or md.get("channel") == "otc_branch"
+    channel = str(md.get("channel") or "").strip().lower() or None
+    walk = md.get("walk_in") is True or channel == "otc_branch"
+    primary_account_number = str(md.get("account_number") or md.get("originator_account") or "").strip() or None
+    if not primary_account_number:
+        try:
+            kyc = await fetch_customer_kyc_any(pg, a.customer_id)
+            if kyc:
+                primary_account_number = str(getattr(kyc, "account_number", "") or "").strip() or None
+        except Exception:
+            pass
     return a.model_copy(
-        update={"linked_transaction_type": tx.transaction_type, "walk_in_otc": bool(walk)}
+        update={
+            "linked_transaction_type": tx.transaction_type,
+            "linked_channel": channel,
+            "walk_in_otc": bool(walk),
+            "customer_name": customer_name,
+            "primary_account_number": primary_account_number,
+        }
     )
 
 
+def _sort_key_for_alert(a: AlertResponse) -> tuple[float, datetime]:
+    return (float(a.severity or 0.0), a.created_at or datetime.min)
+
+
+async def _bvn_group_key(a: AlertResponse, pg: Any, kyc_cache: Optional[Dict[str, Any]] = None) -> str:
+    cid = str(a.customer_id or "").strip()
+    kyc = None
+    if kyc_cache is not None and cid in kyc_cache:
+        kyc = kyc_cache[cid]
+    else:
+        try:
+            kyc = await fetch_customer_kyc_any(pg, cid)
+        except Exception:
+            kyc = None
+        if kyc_cache is not None:
+            kyc_cache[cid] = kyc
+    try:
+        bvn = str(getattr(kyc, "id_number", "") or "").strip()
+        if bvn:
+            return f"bvn:{bvn.lower()}"
+    except Exception:
+        pass
+    return f"cid:{a.customer_id.lower()}"
+
+
+def _txn_account_number(tx: Any) -> str:
+    if not tx:
+        return ""
+    md = tx.metadata if isinstance(tx.metadata, dict) else {}
+    return (
+        str(
+            md.get("account_number")
+            or md.get("originator_account")
+            or md.get("sender_account")
+            or md.get("source_account")
+            or ""
+        ).strip()
+    )
+
+
+async def _attach_linked_context(
+    a: AlertResponse,
+    pg: Any,
+    grouped_alerts: Optional[List[AlertResponse]] = None,
+    *,
+    include_related_transactions: bool = True,
+) -> AlertResponse:
+    try:
+        kyc = await fetch_customer_kyc_any(pg, a.customer_id)
+    except Exception:
+        kyc = None
+    if not kyc:
+        return a
+    bvn = str(getattr(kyc, "id_number", "") or "").strip()
+    if not bvn:
+        return a.model_copy(
+            update={
+                "linked_accounts_count": 1 if a.primary_account_number else 0,
+                "linked_accounts": [
+                    {
+                        "customer_id": a.customer_id,
+                        "customer_name": a.customer_name,
+                        "account_number": a.primary_account_number,
+                    }
+                ]
+                if a.primary_account_number
+                else [],
+            }
+        )
+    linked = await list_bvn_linked_accounts(pg, bvn, primary_customer_id=a.customer_id)
+    linked_cids = {str(r.get("customer_id") or "").strip() for r in linked if isinstance(r, dict)}
+    linked_cids.discard("")
+    linked_accounts = [
+        {
+            "customer_id": str(r.get("customer_id") or "").strip(),
+            "customer_name": str(r.get("customer_name") or "").strip() or None,
+            "account_number": str(r.get("account_number") or "").strip() or None,
+            "bvn": str(r.get("bvn") or bvn),
+        }
+        for r in linked
+        if isinstance(r, dict)
+    ]
+    account_set = {str(x.get("account_number") or "").strip() for x in linked_accounts}
+    account_set.discard("")
+    seeded_tx_ids = {x.transaction_id for x in (grouped_alerts or [a])}
+    related_rows: List[Dict[str, Any]] = []
+    if include_related_transactions:
+        for tx in _TXNS.values():
+            tx_cid = str(getattr(tx, "customer_id", "") or "").strip()
+            if tx_cid not in linked_cids:
+                continue
+            md = tx.metadata if isinstance(tx.metadata, dict) else {}
+            from_acct = _txn_account_number(tx)
+            to_acct = str(
+                md.get("beneficiary_account")
+                or md.get("receiver_account")
+                or md.get("destination_account")
+                or md.get("counterparty_account")
+                or ""
+            ).strip()
+            include = tx.id in seeded_tx_ids
+            if not include and account_set:
+                include = (from_acct in account_set) or (to_acct in account_set)
+            if not include:
+                continue
+            related_rows.append(
+                {
+                    "transaction_id": tx.id,
+                    "customer_id": tx_cid,
+                    "transaction_type": tx.transaction_type,
+                    "amount": float(tx.amount or 0.0),
+                    "currency": tx.currency or "NGN",
+                    "from_account": from_acct or None,
+                    "to_account": to_acct or None,
+                    "narrative": tx.narrative,
+                    "channel": str(md.get("channel") or "").strip() or None,
+                    "created_at": tx.created_at.isoformat() if getattr(tx, "created_at", None) else None,
+                    "seeded_by_alert": tx.id in seeded_tx_ids,
+                }
+            )
+        related_rows.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+    return a.model_copy(
+        update={
+            "linked_accounts_count": len(linked_accounts),
+            "linked_accounts": linked_accounts,
+            "related_transactions": related_rows[:40],
+        }
+    )
+
+
+async def _collapse_alerts_for_table(items: List[AlertResponse], pg: Any) -> List[AlertResponse]:
+    grouped: Dict[str, List[AlertResponse]] = {}
+    kyc_cache: Dict[str, Any] = {}
+    for a in items:
+        key = await _bvn_group_key(a, pg, kyc_cache)
+        grouped.setdefault(key, []).append(a)
+    out: List[AlertResponse] = []
+    for group in grouped.values():
+        group.sort(key=_sort_key_for_alert, reverse=True)
+        top = await _enrich_alert_for_api(group[0], pg)
+        top = await _attach_linked_context(top, pg, grouped_alerts=group, include_related_transactions=False)
+        out.append(top)
+    out.sort(key=_sort_key_for_alert, reverse=True)
+    return out
+
+
 def _alert_matches_otc_estr_queue(a: AlertResponse) -> bool:
-    """Cash / walk-in OTC or any alert already in an OTC regulatory workflow."""
+    """
+    OTC ESTR queue:
+    - explicitly marked otc_estr path, OR
+    - walk-in OTC cash activity (branch/walk-in channel).
+    Excludes ATM/POS/transfer-led alerts, which stay on the core STR alert tab.
+    """
     tx = _TXNS.get(a.transaction_id)
+    kind = str(getattr(a, "otc_report_kind", "") or "").strip().lower()
+    subject = str(getattr(a, "otc_subject", "") or "").strip()
+    if kind == "otc_esar" or subject in OTC_SUBJECTS_ESAR:
+        return False
+    if kind == "otc_estr":
+        return True
     if tx:
         tt = (tx.transaction_type or "").lower()
-        if tt in ("cash_deposit", "cash_withdrawal"):
-            return True
         md = tx.metadata if isinstance(tx.metadata, dict) else {}
-        if md.get("walk_in") is True or md.get("channel") == "otc_branch":
+        ch = str(md.get("channel") or "").strip().lower()
+        walk = md.get("walk_in") is True or ch == "otc_branch"
+        if walk and tt in ("cash_deposit", "cash_withdrawal"):
             return True
-    if a.otc_outcome or a.otc_subject or a.otc_report_kind:
+    return False
+
+
+def _alert_matches_otc_esar_queue(a: AlertResponse) -> bool:
+    """
+    OTC ESAR queue:
+    - identity/profile OTC matters (partial/full name, BVN/NIN, DOB updates)
+    - walk-in OTC records explicitly set to otc_esar path
+    """
+    kind = str(getattr(a, "otc_report_kind", "") or "").strip().lower()
+    subject = str(getattr(a, "otc_subject", "") or "").strip()
+    if kind == "otc_esar" or subject in OTC_SUBJECTS_ESAR:
         return True
     return False
+
+
+def _alert_matches_core_alert_tab(a: AlertResponse) -> bool:
+    """Main Alerts tab: non-OTC or transaction-led alerts (e.g., transfer in/out)."""
+    return not _alert_matches_otc_estr_queue(a) and not _alert_matches_otc_esar_queue(a)
 
 
 def _alert_visible_to_user(user: Dict[str, Any], a: AlertResponse) -> bool:
@@ -142,6 +351,7 @@ def _alert_not_soft_deleted(a: AlertResponse) -> bool:
 
 @router.get("/", response_model=Dict[str, Any])
 async def list_alerts(
+    request: Request,
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=200),
     severity: Optional[str] = Query(
@@ -152,7 +362,7 @@ async def list_alerts(
     sort: str = Query("risk", pattern="^(risk|newest)$"),
     queue: Optional[str] = Query(
         None,
-        description="Optional filter: otc_estr — cash / walk-in OTC or alerts with OTC workflow fields.",
+        description="Optional filter: core | otc_estr | otc_esar",
     ),
     user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -163,8 +373,13 @@ async def list_alerts(
         for a in _ALERTS.values()
         if _alert_visible_to_user(user, a) and _alert_not_soft_deleted(a)
     ]
-    if (queue or "").strip().lower() == "otc_estr":
+    qk = (queue or "").strip().lower()
+    if qk == "otc_estr":
         items = [a for a in items if _alert_matches_otc_estr_queue(a)]
+    elif qk == "otc_esar":
+        items = [a for a in items if _alert_matches_otc_esar_queue(a)]
+    elif qk == "core":
+        items = [a for a in items if _alert_matches_core_alert_tab(a)]
     if status:
         st = status.strip().lower()
         items = [a for a in items if (a.status or "").lower() == st]
@@ -174,13 +389,16 @@ async def list_alerts(
         items.sort(key=lambda a: a.created_at or datetime.min, reverse=True)
     else:
         items.sort(key=lambda a: (a.severity or 0.0), reverse=True)
-    total = len(items)
-    out = [_enrich_alert_for_api(a) for a in items[skip : skip + limit]]
+    pg = getattr(request.app.state, "pg", None)
+    collapsed = await _collapse_alerts_for_table(items, pg)
+    total = len(collapsed)
+    out = collapsed[skip : skip + limit]
     return {"items": out, "total": total, "skip": skip, "limit": limit}
 
 
 @router.get("/search", response_model=Dict[str, Any])
 async def search_alerts(
+    request: Request,
     q: str,
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=200),
@@ -189,7 +407,7 @@ async def search_alerts(
     sort: str = Query("risk", pattern="^(risk|newest)$"),
     queue: Optional[str] = Query(
         None,
-        description="Optional filter: otc_estr — cash / walk-in OTC or alerts with OTC workflow fields.",
+        description="Optional filter: core | otc_estr | otc_esar",
     ),
     user: Dict[str, Any] = Depends(get_current_user),
 ):
@@ -203,12 +421,18 @@ async def search_alerts(
         and (
             (a.summary or "").lower().find(ql) >= 0
             or a.customer_id.lower().find(ql) >= 0
+            or (str(getattr(a, "customer_name", "") or "").lower().find(ql) >= 0)
             or a.transaction_id.lower().find(ql) >= 0
             or a.id.lower().find(ql) >= 0
         )
     ]
-    if (queue or "").strip().lower() == "otc_estr":
+    qk = (queue or "").strip().lower()
+    if qk == "otc_estr":
         items = [a for a in items if _alert_matches_otc_estr_queue(a)]
+    elif qk == "otc_esar":
+        items = [a for a in items if _alert_matches_otc_esar_queue(a)]
+    elif qk == "core":
+        items = [a for a in items if _alert_matches_core_alert_tab(a)]
     if status:
         st = status.strip().lower()
         items = [a for a in items if (a.status or "").lower() == st]
@@ -218,8 +442,10 @@ async def search_alerts(
         items.sort(key=lambda a: a.created_at or datetime.min, reverse=True)
     else:
         items.sort(key=lambda a: (a.severity or 0.0), reverse=True)
-    total = len(items)
-    out = [_enrich_alert_for_api(a) for a in items[skip : skip + limit]]
+    pg = getattr(request.app.state, "pg", None)
+    collapsed = await _collapse_alerts_for_table(items, pg)
+    total = len(collapsed)
+    out = collapsed[skip : skip + limit]
     return {"items": out, "total": total, "skip": skip, "limit": limit}
 
 
@@ -334,7 +560,9 @@ def _alerts_dashboard_payload(user: Dict[str, Any]) -> Dict[str, Any]:
     pending_cco_str = sum(
         1
         for a in visible
-        if (a.status or "").lower() == "escalated" and not a.cco_str_approved and getattr(a, "otc_report_kind", None) != "otc_estr"
+        if (a.status or "").lower() == "escalated"
+        and not a.cco_str_approved
+        and getattr(a, "otc_report_kind", None) not in ("otc_estr", "otc_esar")
     )
     pending_cco_otc = sum(
         1
@@ -435,6 +663,7 @@ async def co_notifications_mark_read(
 
 @router.get("/cco/pending-str-approvals", response_model=Dict[str, Any])
 async def list_pending_cco_str_approvals(
+    request: Request,
     user: Dict[str, Any] = Depends(get_current_user),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
@@ -442,14 +671,15 @@ async def list_pending_cco_str_approvals(
     """Escalated alerts awaiting Chief Compliance Officer approval before STR generation."""
     require_cco_or_admin(user)
     _seed_if_empty()
-    items = [
+    pg = getattr(request.app.state, "pg", None)
+    base_items = [
         a
         for a in _ALERTS.values()
         if (a.status or "").lower() == "escalated"
         and not a.cco_str_approved
-        and getattr(a, "otc_report_kind", None) != "otc_estr"
+        and getattr(a, "otc_report_kind", None) not in ("otc_estr", "otc_esar")
     ]
-    items.sort(key=lambda x: (x.severity or 0.0), reverse=True)
+    items = await _collapse_alerts_for_table(base_items, pg)
     total = len(items)
     return {"items": items[skip : skip + limit], "total": total, "skip": skip, "limit": limit}
 
@@ -461,6 +691,7 @@ def _can_view_pending_otc_queue(user: Dict[str, Any]) -> bool:
 
 @router.get("/cco/pending-otc-approvals", response_model=Dict[str, Any])
 async def list_pending_cco_otc_approvals(
+    request: Request,
     user: Dict[str, Any] = Depends(get_current_user),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
@@ -475,8 +706,9 @@ async def list_pending_cco_otc_approvals(
             detail="Chief Compliance Officer, Administrator, or Compliance Officer role required to view this queue.",
         )
     _seed_if_empty()
-    items = [
-        _enrich_alert_for_api(a)
+    pg = getattr(request.app.state, "pg", None)
+    base_items = [
+        a
         for a in _ALERTS.values()
         if (a.otc_outcome or "") == "true_positive"
         and bool(getattr(a, "otc_report_kind", None))
@@ -484,7 +716,7 @@ async def list_pending_cco_otc_approvals(
         and (a.status or "").lower() == "escalated"
         and _alert_visible_to_user(user, a)
     ]
-    items.sort(key=lambda x: (x.severity or 0.0), reverse=True)
+    items = await _collapse_alerts_for_table(base_items, pg)
     total = len(items)
     return {"items": items[skip : skip + limit], "total": total, "skip": skip, "limit": limit}
 
@@ -589,6 +821,7 @@ async def submit_otc_report(
 
 @router.post("/{alert_id}/cco-approve-otc", response_model=Dict[str, Any])
 async def cco_approve_otc_filing(
+    request: Request,
     alert_id: str,
     body: CcoOtcApprovalBody,
     user: Dict[str, Any] = Depends(get_current_user),
@@ -638,17 +871,33 @@ async def cco_approve_otc_filing(
         resource_id=alert_id,
         details=cco_details,
     )
+    estr_draft_report_id: Optional[str] = None
+    if a.otc_report_kind in ("otc_estr", "otc_esar"):
+        try:
+            import app.api.v1.reports as reports_v1
+
+            draft = await reports_v1._create_estr_draft(
+                request,
+                user,
+                base_alert=alert_id,
+                user_notes=(body.notes or "").strip(),
+            )
+            estr_draft_report_id = str(draft.get("report_id") or "") or None
+        except Exception as exc:
+            log.warning("cco_otc_approval_estr_draft_failed alert_id=%s err=%s", alert_id, exc)
     return {
         "alert_id": alert_id,
         "cco_otc_approved": True,
         "otc_report_kind": a.otc_report_kind,
         "cco_estr_word_approved": a.cco_estr_word_approved,
+        "estr_draft_report_id": estr_draft_report_id,
+        "otc_draft_report_id": estr_draft_report_id,
         "action_key": str(uuid4()),
     }
 
 
 @router.get("/{alert_id}", response_model=AlertResponse)
-async def get_alert(alert_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+async def get_alert(alert_id: str, request: Request, user: Dict[str, Any] = Depends(get_current_user)):
     _seed_if_empty()
     a = _ALERTS.get(alert_id)
     if not a:
@@ -657,7 +906,9 @@ async def get_alert(alert_id: str, user: Dict[str, Any] = Depends(get_current_us
         raise HTTPException(status_code=404, detail="Alert not found")
     if not _alert_visible_to_user(user, a):
         raise HTTPException(status_code=403, detail="Alert outside your zone/branch scope.")
-    return _enrich_alert_for_api(a)
+    pg = getattr(request.app.state, "pg", None)
+    enriched = await _enrich_alert_for_api(a, pg)
+    return await _attach_linked_context(enriched, pg)
 
 
 @router.post("/{alert_id}/reset-workflow", response_model=Dict[str, Any])
@@ -1061,6 +1312,9 @@ async def cco_approve_str_filing(
     try:
         import app.api.v1.reports as reports_v1
 
+        saved_notes = reports_v1.get_saved_str_draft_notes(alert_id)
+        if saved_notes:
+            str_notes_for_draft = saved_notes
         draft_out = await reports_v1._draft_str_report(
             request, alert_id, str_notes_for_draft, user
         )

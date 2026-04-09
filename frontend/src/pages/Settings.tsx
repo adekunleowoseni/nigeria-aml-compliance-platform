@@ -7,8 +7,10 @@ import {
   adminReportingApi,
   aiApi,
   authApi,
+  customersApi,
   type AiProvider,
   type AdminUserRow,
+  type DetectionRuleCatalogItem,
   type RegulatoryCalendarEntry,
 } from '../services/api';
 import { useAuthStore } from '../store/authStore';
@@ -89,6 +91,7 @@ type SettingsSectionId =
   | 'workflow'
   | 'reference-lists'
   | 'red-flags'
+  | 'rule-catalog'
   | 'reporting'
   | 'ai'
   | 'preferences';
@@ -98,6 +101,7 @@ const ADMIN_ONLY_SECTIONS: SettingsSectionId[] = [
   'workflow',
   'reference-lists',
   'red-flags',
+  'rule-catalog',
   'reporting',
   'ai',
 ];
@@ -150,6 +154,12 @@ export default function Settings() {
   const [workflowSaving, setWorkflowSaving] = useState(false);
   const [wfAutoOtc, setWfAutoOtc] = useState(false);
   const [wfAutoStr, setWfAutoStr] = useState(false);
+  const [reviewHighMonths, setReviewHighMonths] = useState(12);
+  const [reviewMediumMonths, setReviewMediumMonths] = useState(18);
+  const [reviewLowMonths, setReviewLowMonths] = useState(36);
+  const [studentCorporateThreshold, setStudentCorporateThreshold] = useState(10000000);
+  const [idExpiryWarningDays, setIdExpiryWarningDays] = useState(0);
+  const [additionalDocsThreshold, setAdditionalDocsThreshold] = useState(20000000);
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
   const [newUserRole, setNewUserRole] = useState('compliance_officer');
@@ -259,6 +269,11 @@ export default function Settings() {
     queryFn: () => adminRedFlagsApi.listRules(),
     enabled: isAdmin && !!token,
   });
+  const detectionCatalogQ = useQuery({
+    queryKey: ['admin', 'detection-rule-catalog'],
+    queryFn: () => adminRedFlagsApi.ruleCatalog(),
+    enabled: isAdmin && !!token,
+  });
 
   useEffect(() => {
     const p = reportingProfileQ.data?.profile;
@@ -314,6 +329,11 @@ export default function Settings() {
     queryFn: () => authApi.getWorkflowSettings(),
     enabled: isAdmin && !!token,
   });
+  const reviewRulesQuery = useQuery({
+    queryKey: ['customers', 'review-rules'],
+    queryFn: () => customersApi.getReviewRules(),
+    enabled: isAdmin && !!token,
+  });
 
   useEffect(() => {
     const d = workflowQuery.data;
@@ -321,6 +341,16 @@ export default function Settings() {
     setWfAutoOtc(d.cco_auto_approve_otc_reporting);
     setWfAutoStr(d.cco_auto_approve_str_on_escalation);
   }, [workflowQuery.data]);
+  useEffect(() => {
+    const r = reviewRulesQuery.data?.rules;
+    if (!r) return;
+    setReviewHighMonths(r.high_months);
+    setReviewMediumMonths(r.medium_months);
+    setReviewLowMonths(r.low_months);
+    setStudentCorporateThreshold(r.student_monthly_turnover_recommend_corporate_ngn);
+    setIdExpiryWarningDays(r.id_expiry_warning_days);
+    setAdditionalDocsThreshold(r.require_additional_docs_when_monthly_turnover_above_ngn);
+  }, [reviewRulesQuery.data]);
 
   const [selectedProvider, setSelectedProvider] = useState<AiProvider>('gemini');
 
@@ -425,6 +455,11 @@ export default function Settings() {
                     <li>
                       <SettingsNavItem sectionId="red-flags" activeSection={activeSection} onSelect={setActiveSection}>
                         Red-flag rules
+                      </SettingsNavItem>
+                    </li>
+                    <li>
+                      <SettingsNavItem sectionId="rule-catalog" activeSection={activeSection} onSelect={setActiveSection}>
+                        Detection rule catalog
                       </SettingsNavItem>
                     </li>
                     <li>
@@ -715,6 +750,113 @@ export default function Settings() {
                 >
                   {workflowSaving ? 'Saving…' : 'Save workflow shortcuts'}
                 </button>
+                <div className="border-t border-slate-200 pt-4 mt-2">
+                  <h4 className="text-sm font-semibold text-slate-900">Automatic customer review rules</h4>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Controls next review date computation and profile-update recommendations shown on Customers page.
+                  </p>
+                  {reviewRulesQuery.isLoading ? (
+                    <p className="text-sm text-slate-500 mt-2">Loading review rules…</p>
+                  ) : reviewRulesQuery.isError ? (
+                    <p className="text-sm text-red-600 mt-2">{(reviewRulesQuery.error as Error).message}</p>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+                      <label className="text-xs text-slate-700">
+                        High risk review cycle (months)
+                        <input
+                          type="number"
+                          min={1}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                          value={reviewHighMonths}
+                          onChange={(e) => setReviewHighMonths(Math.max(1, Number(e.target.value || 1)))}
+                        />
+                      </label>
+                      <label className="text-xs text-slate-700">
+                        Medium risk review cycle (months)
+                        <input
+                          type="number"
+                          min={1}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                          value={reviewMediumMonths}
+                          onChange={(e) => setReviewMediumMonths(Math.max(1, Number(e.target.value || 1)))}
+                        />
+                      </label>
+                      <label className="text-xs text-slate-700">
+                        Low risk review cycle (months)
+                        <input
+                          type="number"
+                          min={1}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                          value={reviewLowMonths}
+                          onChange={(e) => setReviewLowMonths(Math.max(1, Number(e.target.value || 1)))}
+                        />
+                      </label>
+                      <label className="text-xs text-slate-700">
+                        Student turnover threshold for corporate recommendation (NGN)
+                        <input
+                          type="number"
+                          min={0}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                          value={studentCorporateThreshold}
+                          onChange={(e) => setStudentCorporateThreshold(Math.max(0, Number(e.target.value || 0)))}
+                        />
+                      </label>
+                      <label className="text-xs text-slate-700">
+                        ID expiry warning window (days)
+                        <input
+                          type="number"
+                          min={0}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                          value={idExpiryWarningDays}
+                          onChange={(e) => setIdExpiryWarningDays(Math.max(0, Number(e.target.value || 0)))}
+                        />
+                      </label>
+                      <label className="text-xs text-slate-700">
+                        Turnover threshold for additional docs recommendation (NGN)
+                        <input
+                          type="number"
+                          min={0}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm"
+                          value={additionalDocsThreshold}
+                          onChange={(e) => setAdditionalDocsThreshold(Math.max(0, Number(e.target.value || 0)))}
+                        />
+                      </label>
+                      <div className="md:col-span-2">
+                        <button
+                          type="button"
+                          disabled={workflowSaving}
+                          onClick={async () => {
+                            setWorkflowSaving(true);
+                            setWorkflowMsg(null);
+                            try {
+                              await customersApi.putReviewRules({
+                                high_months: reviewHighMonths,
+                                medium_months: reviewMediumMonths,
+                                low_months: reviewLowMonths,
+                                student_monthly_turnover_recommend_corporate_ngn: studentCorporateThreshold,
+                                id_expiry_warning_days: idExpiryWarningDays,
+                                require_additional_docs_when_monthly_turnover_above_ngn: additionalDocsThreshold,
+                              });
+                              setWorkflowMsg({ type: 'success', text: 'Automatic review rules updated.' });
+                              await reviewRulesQuery.refetch();
+                              await queryClient.invalidateQueries({ queryKey: ['customers'], exact: false });
+                            } catch (e) {
+                              setWorkflowMsg({
+                                type: 'error',
+                                text: e instanceof Error ? e.message : 'Could not save automatic review rules.',
+                              });
+                            } finally {
+                              setWorkflowSaving(false);
+                            }
+                          }}
+                          className="px-4 py-2 bg-blue-700 text-white rounded-lg text-sm hover:bg-blue-800 disabled:opacity-50"
+                        >
+                          Save automatic review rules
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </SettingsSectionCard>
@@ -1262,6 +1404,98 @@ export default function Settings() {
                   </button>
                 </div>
               </>
+            )}
+          </SettingsSectionCard>
+        )}
+
+        {isAdmin && activeSection === 'rule-catalog' && (
+          <SettingsSectionCard
+            title="Detection rule catalog"
+            description="Read-only catalog of all rule families used to flag transactions: configurable red-flags/patterns, typologies, and anomaly logic."
+            badge={
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-800 bg-amber-100 border border-amber-200/80 rounded-md px-2 py-0.5">
+                Admin
+              </span>
+            }
+          >
+            {detectionCatalogQ.isLoading ? (
+              <p className="text-sm text-slate-500">Loading detection catalog…</p>
+            ) : detectionCatalogQ.isError ? (
+              <p className="text-sm text-red-600">{(detectionCatalogQ.error as Error).message}</p>
+            ) : (
+              <div className="space-y-6 text-sm">
+                <div className="rounded-lg border border-slate-200 p-4 bg-slate-50/40">
+                  <p className="font-semibold text-slate-900 mb-2">Pattern sources</p>
+                  <ul className="space-y-2">
+                    {(detectionCatalogQ.data?.pattern_sources ?? []).map((p) => (
+                      <li key={p.source} className="text-slate-700">
+                        <span className="font-medium">{p.source}:</span> {p.description}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+
+                {(
+                  [
+                    {
+                      title: 'Custom red-flag rules (admin-managed)',
+                      rows: (detectionCatalogQ.data?.red_flag_rules ?? []).map((r) => ({
+                        rule_id: r.rule_code,
+                        title: r.title,
+                        description: r.description,
+                      })),
+                      empty: 'No red-flag rules available.',
+                    },
+                    {
+                      title: 'Built-in typology rules',
+                      rows: detectionCatalogQ.data?.typology_rules ?? [],
+                      empty: 'No typology rules found.',
+                    },
+                    {
+                      title: 'Anomaly rules',
+                      rows: detectionCatalogQ.data?.anomaly_rules ?? [],
+                      empty: 'No anomaly rules found.',
+                    },
+                  ] as const
+                ).map((block) => (
+                  <div key={block.title} className="rounded-lg border border-slate-200 overflow-hidden">
+                    <div className="px-4 py-3 bg-slate-100/70 border-b border-slate-200">
+                      <p className="font-semibold text-slate-900">{block.title}</p>
+                    </div>
+                    {block.rows.length === 0 ? (
+                      <p className="px-4 py-3 text-slate-500">{block.empty}</p>
+                    ) : (
+                      <div className="max-h-80 overflow-auto">
+                        <table className="w-full text-xs">
+                          <thead className="bg-white text-slate-600 text-left sticky top-0">
+                            <tr>
+                              <th className="px-3 py-2 w-56">Rule ID / Code</th>
+                              <th className="px-3 py-2 w-56">Title</th>
+                              <th className="px-3 py-2">Description</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {block.rows.map((r: DetectionRuleCatalogItem) => (
+                              <tr key={r.rule_id}>
+                                <td className="px-3 py-2 font-mono text-slate-800 align-top">{r.rule_id}</td>
+                                <td className="px-3 py-2 text-slate-800 align-top">{r.title}</td>
+                                <td className="px-3 py-2 text-slate-700 align-top">
+                                  {r.description}
+                                  {r.parameters ? (
+                                    <div className="mt-1 text-[11px] text-slate-500">
+                                      Params: <code>{JSON.stringify(r.parameters)}</code>
+                                    </div>
+                                  ) : null}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
           </SettingsSectionCard>
         )}

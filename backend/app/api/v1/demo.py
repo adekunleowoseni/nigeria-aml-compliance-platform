@@ -13,11 +13,14 @@ from app.api.v1.transactions import _process_transaction_async, run_temporal_sim
 from app.config import settings
 from app.core.security import create_access_token, get_current_user
 from app.services import audit_trail
+from app.models.alert import AlertResponse
 from app.models.transaction import TransactionResponse
 from app.services.aop_upload_store import clear_aop_upload_catalog
 from app.services.customer_kyc_db import clear_memory_kyc
 from app.services.demo_showcase import seed_high_risk_showcase
 from app.services.demo_seed_export import build_demo_seed_workbook_bytes
+from app.services.demo_statement_bulk_seed import run_statement_bulk_seed
+from app.services.demo_mass_customer_seed import run_mass_customer_seed
 from app.services.demo_standard_seed import run_standard_demo_transaction_sequence
 from app.services.otc_branch_reference_seed import apply_otc_branch_reference_seed, export_reference_table_json_ready
 from app.services.demo_aop_template_seed import seed_demo_aop_template_for_all_customers
@@ -87,6 +90,31 @@ class OtcBranchReferenceSeedBody(BaseModel):
     )
 
 
+class StatementBulkSeedBody(BaseModel):
+    """Append statement-heavy transaction lines across all demo customers."""
+
+    routine_count: int = Field(
+        1_550,
+        ge=1_500,
+        le=20_000,
+        description="Routine mixed inflow/outflow lines to add across all demo customers.",
+    )
+    suspicious_outflows_per_scenario: int = Field(
+        20,
+        ge=1,
+        le=200,
+        description="Suspicious dissipation-style outflows to add per DEMO-SC-* customer.",
+    )
+    seed: int = Field(77, description="RNG seed for reproducible statement line generation.")
+
+
+class MassCustomerSeedBody(BaseModel):
+    customer_count: int = Field(1234, ge=1, le=10000)
+    risky_customer_count: int = Field(104, ge=1, le=5000)
+    suspicious_per_risky_customer: int = Field(500, ge=1, le=2000)
+    seed: int = Field(20260407)
+
+
 async def _clear_demo_stores(
     request: Request,
     *,
@@ -138,9 +166,38 @@ def get_demo_token() -> Dict[str, str]:
     return {"access_token": token, "token_type": "bearer"}
 
 
-async def _enqueue(txn: TransactionResponse) -> None:
+async def _enqueue(txn: TransactionResponse, *, process: bool = True, skip_llm: bool = True) -> None:
     _TXNS[txn.id] = txn
-    await _process_transaction_async(txn.id)
+    if not process:
+        md = txn.metadata if isinstance(txn.metadata, dict) else {}
+        try:
+            txn.risk_score = float(md.get("demo_severity") or 0.15)
+        except (TypeError, ValueError):
+            txn.risk_score = 0.15
+        txn.status = "processed"
+        if (md.get("suspicious_seed") is True) or (float(md.get("demo_severity") or 0.0) >= 0.7):
+            rules: List[str] = []
+            rc = str(md.get("seed_rule_code") or "").strip()
+            an = str(md.get("seed_anomaly_tag") or "").strip()
+            if rc:
+                rules.append(rc)
+            if an:
+                rules.append(an)
+            if not rules:
+                rules = ["RULE-DEMO-SEED"]
+            alert = AlertResponse(
+                transaction_id=txn.id,
+                customer_id=txn.customer_id,
+                severity=max(0.7, float(txn.risk_score or 0.7)),
+                status="open",
+                rule_ids=rules,
+                summary=(txn.narrative or "Seeded suspicious demo transaction")[:500],
+            )
+            _ALERTS[alert.id] = alert
+            txn.alert_id = alert.id
+        _TXNS[txn.id] = txn
+        return
+    await _process_transaction_async(txn.id, skip_llm=skip_llm)
 
 
 def _md(**kwargs: Any) -> Dict[str, Any]:
@@ -169,7 +226,7 @@ async def seed_demo_data(
 
     async def emit(txn: TransactionResponse) -> None:
         acc.append(txn)
-        await _enqueue(txn)
+        await _enqueue(txn, process=False)
 
     await run_standard_demo_transaction_sequence(now, emit)
     created = [t.id for t in acc]
@@ -181,6 +238,26 @@ async def seed_demo_data(
         "replaced": body.replace_existing,
         "aop_template_seed": aop_seed,
     }
+
+
+@router.post("/seed-missing-aop")
+async def seed_missing_aop_templates(
+    request: Request,
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Attach an AOP PDF to every customer that currently has no AOP on file.
+    Uses customer name for the generated filename and persists to DB when available.
+    """
+    out = await _attach_demo_aop_templates(request, user)
+    audit_trail.record_event_from_user(
+        user,
+        action="demo.seed_missing_aop",
+        resource_type="demo_environment",
+        resource_id="seed_missing_aop",
+        details={"applied": out.get("applied"), "skipped": out.get("skipped")},
+    )
+    return out
 
 
 @router.post("/seed-showcase")
@@ -235,16 +312,112 @@ async def seed_otc_branch_reference(
     return out
 
 
+@router.post("/seed-statement-bulk")
+async def seed_statement_bulk(
+    request: Request,
+    body: StatementBulkSeedBody = StatementBulkSeedBody(),
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Append 1,500+ statement lines across all demo customers (NIBSS/NIP, card, POS, USSD, ATM),
+    plus suspicious outflow chains for scenario customers (internal sweeps, external drains,
+    structuring-adjacent splits, layering-style outward legs).
+    """
+    acc: List[TransactionResponse] = []
+
+    async def emit(txn: TransactionResponse) -> None:
+        acc.append(txn)
+        await _enqueue(txn, process=False)
+
+    seeded = await run_statement_bulk_seed(
+        emit,
+        now=datetime.utcnow(),
+        seed=body.seed,
+        routine_count=body.routine_count,
+        suspicious_outflows_per_scenario=body.suspicious_outflows_per_scenario,
+    )
+    seeded["seeded_transactions"] = len(acc)
+    seeded["in_memory_transaction_count"] = len(_TXNS)
+    audit_trail.record_event_from_user(
+        user,
+        action="demo.seed_statement_bulk",
+        resource_type="demo_environment",
+        resource_id="seed_statement_bulk",
+        details={
+            "routine_count": body.routine_count,
+            "suspicious_outflows_per_scenario": body.suspicious_outflows_per_scenario,
+            "seed": body.seed,
+            "seeded_transactions": len(acc),
+        },
+    )
+    _ = request
+    return seeded
+
+
+@router.post("/seed-mass-customers")
+async def seed_mass_customers(
+    request: Request,
+    body: MassCustomerSeedBody = MassCustomerSeedBody(),
+    user: Dict[str, Any] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Add many random customers with KYC + mixed-channel transactions, then add suspicious
+    in/out movements for risky customers with metadata tags for scenario/rule/anomaly.
+    """
+    pg = getattr(request.app.state, "pg", None)
+    if pg is None:
+        raise HTTPException(status_code=503, detail="Postgres connection required for mass customer seed.")
+    acc: List[TransactionResponse] = []
+
+    async def emit(txn: TransactionResponse) -> None:
+        acc.append(txn)
+        await _enqueue(txn, process=False)
+
+    out = await run_mass_customer_seed(
+        pg=pg,
+        emit=emit,
+        now=datetime.utcnow(),
+        customer_count=body.customer_count,
+        risky_customer_count=body.risky_customer_count,
+        suspicious_per_risky_customer=body.suspicious_per_risky_customer,
+        seed=body.seed,
+    )
+    # Ensure every seeded customer has an AOP file in their name.
+    aop = await _attach_demo_aop_templates(request, user)
+    out["aop_template_seed"] = aop
+    out["in_memory_transaction_count"] = len(_TXNS)
+    out["alerts_count"] = len(_ALERTS)
+    audit_trail.record_event_from_user(
+        user,
+        action="demo.seed_mass_customers",
+        resource_type="demo_environment",
+        resource_id="seed_mass_customers",
+        details={
+            "customer_count": body.customer_count,
+            "risky_customer_count": body.risky_customer_count,
+            "suspicious_per_risky_customer": body.suspicious_per_risky_customer,
+            "seed": body.seed,
+            "total_transactions": out.get("total_transactions"),
+        },
+    )
+    return out
+
+
 @router.post("/seed-complete-demo")
 async def seed_complete_demo(
     request: Request,
     user: Dict[str, Any] = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
-    Single action: clear demo stores once, then load (1) standard AML demo pack, (2) twelve-track high-risk showcase,
-    (3) branch OTC / STR reference spreadsheet (10 rows), (4) attach demo AOP templates, and (5) append **10-year
-    synthetic history** for the six temporal demo profiles (baseline + scenarios + integration legs) **without** wiping
-    the prior seeds — same net effect as the former standalone "Simulate 10-year history" after the packs above.
+    Single action: clear demo stores once, then load:
+    (1) standard AML demo pack,
+    (2) twelve-track high-risk showcase,
+    (3) branch OTC / STR reference spreadsheet (10 rows),
+    (4) statement-heavy mixed-rail transactions (1,550+),
+    (5) missing AOP templates,
+    (6) 10-year synthetic history for six temporal demo profiles,
+    (7) 1,234 random customers + high-risk pack (104 risky customers, 500 suspicious transactions each),
+    and finally attach AOP templates again for any late-added customers.
 
     May take 1–2 minutes. Postgres ``aml_customer_kyc`` is cleared at the start (same as before).
     """
@@ -267,6 +440,22 @@ async def seed_complete_demo(
     otc = await seed_otc_branch_reference(
         request,
         OtcBranchReferenceSeedBody(replace_existing=False, clear_postgres_kyc=False),
+        user,
+    )
+    statement_bulk = await seed_statement_bulk(
+        request,
+        StatementBulkSeedBody(routine_count=1_550, suspicious_outflows_per_scenario=20, seed=77),
+        user,
+    )
+    missing_aop_seed = await seed_missing_aop_templates(request, user)
+    mass_customer_seed = await seed_mass_customers(
+        request,
+        MassCustomerSeedBody(
+            customer_count=1234,
+            risky_customer_count=104,
+            suspicious_per_risky_customer=500,
+            seed=20260407,
+        ),
         user,
     )
     otc_txn = otc.get("transaction_ids") if isinstance(otc.get("transaction_ids"), list) else []
@@ -293,11 +482,16 @@ async def seed_complete_demo(
         "standard": standard,
         "showcase": showcase,
         "otc_branch": otc,
+        "statement_bulk": statement_bulk,
+        "missing_aop_seed": missing_aop_seed,
+        "mass_customer_seed": mass_customer_seed,
         "aop_template_seed": aop_final,
         "temporal_simulation": temporal,
         "seeded_transactions_total": int(standard.get("seeded_transactions") or 0)
         + int(showcase.get("seeded_transactions") or 0)
         + len(otc_txn)
+        + int(statement_bulk.get("seeded_transactions") or 0)
+        + int(mass_customer_seed.get("total_transactions") or 0)
         + int(temporal.get("total_generated") or 0),
         "in_memory_transaction_count": len(_TXNS),
     }

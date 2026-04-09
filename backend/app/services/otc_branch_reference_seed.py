@@ -312,7 +312,7 @@ async def apply_otc_branch_reference_seed(
             account_number=str(row["account"]),
             account_opened=date(2019, 6, 1),
             customer_address=f"On file via branch referral — {row['branch']}",
-            line_of_business="Not stated on branch intake (see OTC rationale)",
+            line_of_business="Occupation not provided during branch intake",
             phone_number=f"+234800{sid[-4:]}000",
             date_of_birth=date(1980, 1, 15),
             id_number=_bvn_for_row(sid),

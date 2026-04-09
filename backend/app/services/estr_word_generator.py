@@ -84,29 +84,28 @@ def otc_filing_reason_display(reason: Optional[str]) -> str:
 
 def nature_of_unusual_activity_from_otc(alert: Optional[Dict[str, Any]]) -> str:
     """
-    Section I bullet aligned to branch intake: OTC subject label plus branch summary / detail when helpful.
+    Section I line aligned to OTC intake fields only:
+    subject + filing reason (+ optional reason detail).
+    Avoids typology/red-flag summary language.
     """
     if not alert:
         return "Not specified"
     subj_raw = alert.get("otc_subject")
-    label = otc_subject_display(str(subj_raw) if subj_raw else None)
-    summary = str(alert.get("summary") or "").strip()
+    subject_label = otc_subject_display(str(subj_raw) if subj_raw else None)
+    reason_label = otc_filing_reason_display(alert.get("otc_filing_reason"))
     detail = str(alert.get("otc_filing_reason_detail") or "").strip()
-    tail = summary or detail
-    if not tail:
-        return label
-    if tail.lower() in label.lower() or label.lower() in tail.lower():
-        return label if len(label) >= len(tail) else tail
-    if len(tail) > 240:
-        tail = tail[:237].rstrip() + "…"
-    return f"{label} — {tail}"
+    if detail:
+        if len(detail) > 180:
+            detail = detail[:177].rstrip() + "…"
+        return f"{subject_label} ({reason_label}) — {detail}"
+    return f"{subject_label} ({reason_label})"
 
 
 def otc_estr_document_title(otc_subject: Optional[str]) -> str:
     s = (otc_subject or "").strip().lower()
     if not s or s in OTC_SUBJECTS_ESTR:
         return "OTC SUSPICIOUS TRANSACTION REPORT"
-    return "OTC SUSPICIOUS ACTIVITY REPORT"
+    return "SUSPICIOUS ACTIVITY REPORT"
 
 
 def _reporting_line(is_transaction_report: bool) -> str:
@@ -224,6 +223,7 @@ async def render_otc_estr_docx_bytes(
     alert: Optional[Dict[str, Any]],
     estr_notes: str,
     approver_name: str,
+    bvn_linked_accounts: Optional[list[dict[str, Any]]] = None,
 ) -> bytes:
     subj = (alert or {}).get("otc_subject") if alert else None
     subj_s = str(subj).strip().lower() if subj else ""
@@ -247,6 +247,77 @@ async def render_otc_estr_docx_bytes(
     doc = Document()
     _add_title(doc, title)
 
+    if not is_trx:
+        # ESAR format mirrors the provided SAR-style stationery: simple profile lines,
+        # explicit "REASONS FOR FILING SAR", "ACTION TAKEN", then approval attestation.
+        _labeled(doc, "Customer Name", customer.customer_name)
+        _labeled(doc, "Customer Account Number", customer.account_number)
+        _labeled(doc, "Account Opened", _date_to_long(customer.account_opened))
+        _labeled(doc, "Customer Address", customer.customer_address)
+        _labeled(doc, "Line of Business", customer.line_of_business)
+        _labeled(doc, "ID Card Number", customer.id_number)
+        _labeled(doc, "Phone Number", customer.phone_number or "—")
+        _labeled(doc, "Date of Birth", _date_to_long(customer.date_of_birth))
+        _labeled(doc, "Nature of Unusual Activity", nature_line)
+
+        p = doc.add_paragraph()
+        p.add_run("REASONS FOR FILING SAR:").bold = True
+        for block in reasons_body.split("\n\n"):
+            b = block.strip()
+            if b:
+                doc.add_paragraph(b)
+
+        linked_accounts: list[str] = []
+        for row in bvn_linked_accounts or []:
+            if not isinstance(row, dict):
+                continue
+            acct = str(row.get("account_number") or "").strip()
+            if acct:
+                linked_accounts.append(acct)
+        linked_accounts = sorted(set(linked_accounts))
+        other_accounts = [a for a in linked_accounts if a != customer.account_number]
+        if other_accounts:
+            bvn_link_line = f"The customer's BVN is linked to other account number(s) in the bank: {', '.join(other_accounts)}."
+        else:
+            bvn_link_line = (
+                "A review of the bank's database reveals that the customer's BVN is not linked "
+                "to any other account in the bank."
+            )
+        doc.add_paragraph(
+            f"The customer commenced banking relationship with the bank on {_date_to_long(customer.account_opened)}. "
+            f"The account was opened with account number {customer.account_number} and BVN {customer.id_number}. "
+            f"{bvn_link_line}"
+        )
+        doc.add_paragraph(
+            f"CDD and KYC were carried out at account opening where the customer was profiled as "
+            f'"{customer.line_of_business}". There is currently no adverse media report treated as a final determination.'
+        )
+        doc.add_paragraph(
+            "We have concerns over this account based on the observed profile-change activity and supporting rationale "
+            "provided in this filing."
+        )
+
+        p = doc.add_paragraph()
+        p.add_run("ACTION TAKEN: ").bold = True
+        p.add_run(
+            "The account is being closely monitored and has been reported to the NFIU in line with AML/CFT directives."
+        )
+
+        doc.add_paragraph("")
+        p = doc.add_paragraph()
+        p.add_run("APPROVAL").bold = True
+        doc.add_paragraph(
+            "I have reviewed and confirmed that my comments have been incorporated. "
+            "I am approving the filing of an STR/SAR with the NFIU."
+        )
+        doc.add_paragraph("APPROVER: _______________________________")
+        doc.add_paragraph(approver_name.strip() or "Chief Compliance Officer")
+        doc.add_paragraph(f"DATE: {datetime.utcnow().strftime('%B %d, %Y')}")
+
+        out = BytesIO()
+        doc.save(out)
+        return out.getvalue()
+
     _section_heading(doc, "I", "PROFILE")
     _labeled(doc, "Customer Name", customer.customer_name)
     _labeled(doc, "Account Number", customer.account_number)
@@ -265,11 +336,27 @@ async def render_otc_estr_docx_bytes(
         if b:
             doc.add_paragraph(b)
 
+    linked_accounts: list[str] = []
+    for row in bvn_linked_accounts or []:
+        if not isinstance(row, dict):
+            continue
+        acct = str(row.get("account_number") or "").strip()
+        if acct:
+            linked_accounts.append(acct)
+    linked_accounts = sorted(set(linked_accounts))
+    other_accounts = [a for a in linked_accounts if a != customer.account_number]
+    other_accounts_line = (
+        "No other accounts linked to this BVN were identified in the bank's records."
+        if not other_accounts
+        else ", ".join(other_accounts)
+    )
+
     doc.add_paragraph(
         f"The customer commenced banking relationship with the bank on {_date_to_long(customer.account_opened)}. "
         f"The account is held under account number {customer.account_number} and BVN {customer.id_number}. "
         "A review of the bank's records confirms linkage details on file."
     )
+    doc.add_paragraph(f"Other BVN-linked account numbers on file: {other_accounts_line}")
     doc.add_paragraph(
         f"CDD and KYC were carried out at account opening; the customer is profiled as \"{customer.line_of_business}\". "
         "There is currently no automated adverse-media hit treated as a final determination; manual validation remains required."

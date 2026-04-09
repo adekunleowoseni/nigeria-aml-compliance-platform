@@ -1,21 +1,202 @@
 [
   {
-    "incident_id": "AM-4412",
-    "subject": "John Okafor",
-    "headline": "CEO of Local Tech Firm Arrested for $2M Crypto Ponzi Scheme",
-    "publication": "Premium Times Nigeria",
+    "incident_id": "AM-4414",
+    "subject": "David Nnamdi",
+    "headline": "Ex-State Governor's Aide David Nnamdi Arrested for ₦450 Million Contract Scam",
+    "publication": "The Punch Nigeria",
     "category": "Fraud / Financial Crime",
     "sentiment": "Negative",
-    "article_url": "https://example-news.ng",
+    "article_url": "https://punchng.com/ex-governor-aide-nnamdi-arrested",
     "verified": true,
-    "date_published": "2024-03-25"
+    "date_published": "2025-01-15"
   },
   {
-    "incident_id": "AM-4413",
-    "subject": "GreenEnergy Solutions",
-    "headline": "Environmental Agency Fines Company for Oil Spill in Delta State",
+    "incident_id": "AM-4415",
+    "subject": "David Nwosu",
+    "headline": "David Nwosu Named in Panama Papers Leak for Offshore Shell Companies",
+    "publication": "Premium Times Nigeria",
+    "category": "Tax Evasion / Offshore Leaks",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2024-11-02"
+  },
+  {
+    "incident_id": "AM-4416",
+    "subject": "David Ogunleye",
+    "headline": "Court Orders Asset Freeze of Businessman David Ogunleye Over Bank Fraud",
+    "publication": "Vanguard Nigeria",
+    "category": "Fraud / Financial Crime",
+    "sentiment": "Negative",
+    "article_url": "https://vanguard.ng/ogunleye-asset-freeze",
+    "verified": true,
+    "date_published": "2024-09-18"
+  },
+  {
+    "incident_id": "AM-4417",
+    "subject": "David Okafor",
+    "headline": "David Okafor, CEO of Okafor Holdings, Accused of $5 Million Money Laundering",
+    "publication": "The Guardian Nigeria",
+    "category": "Money Laundering",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2025-02-10"
+  },
+  {
+    "incident_id": "AM-4418",
+    "subject": "David Okechukwu",
+    "headline": "Alleged Bribery: David Okechukwu Named in Judicial Corruption Scandal",
+    "publication": "Sahara Reporters",
+    "category": "Corruption / Bribery",
+    "sentiment": "Negative",
+    "article_url": "https://saharareporters.com/okechukwu-bribery",
+    "verified": true,
+    "date_published": "2024-07-22"
+  },
+  {
+    "incident_id": "AM-4419",
+    "subject": "David Olatunji",
+    "headline": "EFCC Declares David Olatunji Wanted for ₦1.2 Billion Oil Subsidy Fraud",
+    "publication": "ThisDay Live",
+    "category": "Fraud / Financial Crime",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2024-12-05"
+  },
+  {
+    "incident_id": "AM-4420",
+    "subject": "David Onyeka",
+    "headline": "David Onyeka’s Real Estate Firm Linked to Land Grabbing and Intimidation",
+    "publication": "Daily Trust Nigeria",
+    "category": "Human Rights Abuses",
+    "sentiment": "Negative",
+    "article_url": "https://dailytrust.ng/onyeka-land-grabbing",
+    "verified": true,
+    "date_published": "2025-03-01"
+  },
+  {
+    "incident_id": "AM-4421",
+    "subject": "David Suleiman",
+    "headline": "Terrorism Financing Allegations: David Suleiman Under Investigation by NFIU",
+    "publication": "Leadership Nigeria",
+    "category": "Terrorism Financing",
+    "sentiment": "Negative",
+    "verified": false,
+    "date_published": "2024-10-14"
+  },
+  {
+    "incident_id": "AM-4422",
+    "subject": "David Umeh",
+    "headline": "SEC Sanctions David Umeh for Insider Trading on Nigerian Stock Exchange",
+    "publication": "BusinessDay Nigeria",
     "category": "Regulatory Breach",
     "sentiment": "Negative",
-    "date_published": "2023-12-12"
+    "article_url": "https://businessday.ng/umeh-insider-trading",
+    "verified": true,
+    "date_published": "2025-01-28"
+  },
+  {
+    "incident_id": "AM-4423",
+    "subject": "Eniola Abubakar",
+    "headline": "Eniola Abubakar, Former Petroleum Minister’s Aide, Charged with Oil Theft",
+    "publication": "The Cable Nigeria",
+    "category": "Fraud / Financial Crime",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2024-08-09"
+  },
+  {
+    "incident_id": "AM-4424",
+    "subject": "Eniola Adeyemi",
+    "headline": "UK Court Freezes £3 Million Assets of Eniola Adeyemi Over Money Laundering",
+    "publication": "Premium Times Nigeria",
+    "category": "Money Laundering",
+    "sentiment": "Negative",
+    "article_url": "https://premiumtimes.ng/adeyemi-assets-frozen",
+    "verified": true,
+    "date_published": "2025-02-17"
+  },
+  {
+    "incident_id": "AM-4425",
+    "subject": "Eniola Afolabi",
+    "headline": "Whistleblower Alleges Eniola Afolabi Diverted ₦800 Million COVID-19 Relief Funds",
+    "publication": "Sahara Reporters",
+    "category": "Corruption / Embezzlement",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2024-06-30"
+  },
+  {
+    "incident_id": "AM-4426",
+    "subject": "Eniola Ahmed",
+    "headline": "NAFDAC Shuts Down Eniola Ahmed’s Factory for Producing Counterfeit Drugs",
+    "publication": "The Punch Nigeria",
+    "category": "Regulatory Breach",
+    "sentiment": "Negative",
+    "article_url": "https://punchng.com/ahmed-fake-drugs",
+    "verified": true,
+    "date_published": "2024-12-01"
+  },
+  {
+    "incident_id": "AM-4427",
+    "subject": "Eniola Bakare",
+    "headline": "Eniola Bakare Accused of Human Trafficking; Interpol Issues Red Notice",
+    "publication": "Vanguard Nigeria",
+    "category": "Human Trafficking",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2025-03-10"
+  },
+  {
+    "incident_id": "AM-4428",
+    "subject": "Eniola Balogun",
+    "headline": "Eniola Balogun’s NGO Under Investigation for Laundering Foreign Grants",
+    "publication": "Daily Trust Nigeria",
+    "category": "Money Laundering",
+    "sentiment": "Negative",
+    "article_url": "https://dailytrust.ng/balogun-ngo-laundering",
+    "verified": false,
+    "date_published": "2024-09-05"
+  },
+  {
+    "incident_id": "AM-4429",
+    "subject": "Eniola Bello",
+    "headline": "Cybercrime: Hacker Eniola Bello Arrested for ₦600 Million Phishing Scheme",
+    "publication": "Leadership Nigeria",
+    "category": "Cybercrime",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2025-01-12"
+  },
+  {
+    "incident_id": "AM-4430",
+    "subject": "Eniola Eze",
+    "headline": "Eniola Eze Linked to Illegal Wildlife Trafficking Ring",
+    "publication": "The Guardian Nigeria",
+    "category": "Environmental Crime",
+    "sentiment": "Negative",
+    "article_url": "https://guardian.ng/eze-wildlife-trafficking",
+    "verified": true,
+    "date_published": "2024-11-20"
+  },
+  {
+    "incident_id": "AM-4431",
+    "subject": "Eniola Ibrahim",
+    "headline": "Eniola Ibrahim Sanctioned by EU for Supplying Arms to Militias",
+    "publication": "Premium Times Nigeria",
+    "category": "Arms Trafficking",
+    "sentiment": "Negative",
+    "verified": true,
+    "date_published": "2025-02-25"
+  },
+  {
+    "incident_id": "AM-4432",
+    "subject": "Eniola Lawal",
+    "headline": "FCCPC Fines Eniola Lawal’s Telecom Firm for Consumer Data Breach",
+    "publication": "BusinessDay Nigeria",
+    "category": "Regulatory Breach",
+    "sentiment": "Negative",
+    "article_url": "https://businessday.ng/lawal-data-breach",
+    "verified": true,
+    "date_published": "2024-10-08"
   }
 ]

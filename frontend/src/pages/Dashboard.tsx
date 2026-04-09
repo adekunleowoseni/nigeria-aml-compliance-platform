@@ -72,18 +72,8 @@ export default function Dashboard() {
     : [];
 
   const highRiskAlerts = (alertsList?.items ?? []).filter((a) => a.severity >= 0.8).slice(0, 5);
-
-  const ingestMutation = useMutation({
-    mutationFn: () => demoApi.ingestFlagship(),
-    onSuccess: async () => {
-      // give the background task a moment then refresh alerts/metrics
-      await new Promise((r) => setTimeout(r, 600));
-      queryClient.invalidateQueries({ queryKey: ['alerts'] });
-      queryClient.invalidateQueries({ queryKey: ['alerts-dashboard'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-      navigate('/alerts');
-    },
-  });
+  const displayCustomer = (a: { customer_name?: string | null; customer_id: string }) =>
+    String(a.customer_name || '').trim() || a.customer_id;
 
   const seedCompleteDemoMutation = useMutation({
     mutationFn: () => demoApi.seedCompleteDemo(),
@@ -105,7 +95,7 @@ export default function Dashboard() {
   const isComplianceRole =
     r === 'compliance_officer' || r === 'admin' || r === 'chief_compliance_officer';
 
-  const anySeedBusy = ingestMutation.isPending || seedCompleteDemoMutation.isPending;
+  const anySeedBusy = seedCompleteDemoMutation.isPending;
 
   const [demoExportMsg, setDemoExportMsg] = useState<string | null>(null);
 
@@ -358,7 +348,7 @@ export default function Dashboard() {
                   >
                     <span className="font-medium text-slate-900 line-clamp-1">{a.summary ?? 'Suspicious activity'}</span>
                     <span className="text-slate-500 block mt-0.5">
-                      {(a.severity * 100).toFixed(0)}% risk · {a.customer_id}
+                      {(a.severity * 100).toFixed(0)}% risk · {displayCustomer(a)}
                     </span>
                   </button>
                 </li>
@@ -369,10 +359,7 @@ export default function Dashboard() {
         <div className="bg-white rounded-lg shadow p-4">
           <h3 className="font-semibold mb-4">Quick Actions</h3>
           <p className="text-xs text-slate-500 mb-3">
-            <strong>Load complete demo</strong> clears prior in-memory transactions and alerts (and demo KYC in Postgres when
-            connected), then loads the standard AML pack, the 12-track showcase, the 10-row branch OTC / STR table, demo AOP
-            templates, and <strong>10-year synthetic transaction history</strong> (six demo profiles + scenarios) in one run —
-            may take <strong>1–2 minutes</strong>. Use <strong>Customers</strong> after loading to upload AOP where needed.
+            <strong>Load AML demo</strong> runs the complete demo command in one click. This can take a few minutes.
           </p>
           <div className="flex flex-wrap gap-2">
             <button
@@ -387,20 +374,11 @@ export default function Dashboard() {
               onClick={() => seedCompleteDemoMutation.mutate()}
               disabled={anySeedBusy}
               className="px-4 py-2 bg-violet-700 text-white rounded hover:bg-violet-800 disabled:opacity-50"
-              title="Clears once, then: AML pack + showcase + OTC table + AOP templates + 10-year temporal history (append). 1–2 min."
+              title="Runs full AML demo load."
             >
               {seedCompleteDemoMutation.isPending
-                ? 'Loading complete demo (1–2 min)…'
-                : 'Load complete demo (AML + showcase + OTC + 10-year history)'}
-            </button>
-            <button
-              type="button"
-              onClick={() => ingestMutation.mutate()}
-              disabled={anySeedBusy}
-              className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
-              title="Clears demo stores then ingests one high-signal wire (ministry memo / PEP-style)"
-            >
-              {ingestMutation.isPending ? 'Ingesting…' : 'Ingest demo suspicious txn'}
+                ? 'Loading AML demo (this may take a few minutes)…'
+                : 'Load AML demo'}
             </button>
             <button
               type="button"
@@ -420,39 +398,20 @@ export default function Dashboard() {
                 }
               }}
               className="px-4 py-2 bg-white border border-slate-300 text-slate-800 rounded hover:bg-slate-50 text-sm"
-              title="All demo seed tables in one workbook (OTC, standard seed, showcase, flagship, temporal). Does not change data."
+              title="All demo seed tables in one workbook. Does not change data."
             >
-              Download all demo seed data (Excel)
+              Download demo data (Excel)
             </button>
-            <button
-              type="button"
-              onClick={async () => {
-                setDemoExportMsg(null);
-                try {
-                  await demoApi.downloadOtcBranchReferenceStructureCsv();
-                } catch (e) {
-                  setDemoExportMsg(e instanceof Error ? e.message : 'Could not download reference CSV.');
-                }
-              }}
-              className="px-4 py-2 bg-white border border-slate-300 text-slate-800 rounded hover:bg-slate-50 text-sm"
-              title="10-row branch OTC / STR intake reference (structure only). Opens in Excel."
-            >
-              Download OTC branch reference (CSV)
-            </button>
+
           </div>
           {demoExportMsg && (
             <p className="mt-3 text-sm text-red-600" role="alert">
               {demoExportMsg}
             </p>
           )}
-          {ingestMutation.isError && (
-            <p className="mt-3 text-sm text-red-600">
-              Failed to ingest demo transaction: {(ingestMutation.error as Error).message}
-            </p>
-          )}
           {seedCompleteDemoMutation.isError && (
             <p className="mt-3 text-sm text-red-600">
-              Failed to load complete demo: {(seedCompleteDemoMutation.error as Error).message}
+              Failed to load AML demo: {(seedCompleteDemoMutation.error as Error).message}
             </p>
           )}
         </div>

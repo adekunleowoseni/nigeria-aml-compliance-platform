@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import DashboardLayout from '../components/layout/DashboardLayout';
 import { customersApi, type CustomerUploadDocumentKind } from '../services/api';
 
 export default function Customers() {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [page, setPage] = useState(1);
   const pageSize = 50;
@@ -13,6 +15,9 @@ export default function Customers() {
   const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [aopDownloadingId, setAopDownloadingId] = useState<string | null>(null);
+  const [soaDownloadingId, setSoaDownloadingId] = useState<string | null>(null);
+  const [soaStartByCustomer, setSoaStartByCustomer] = useState<Record<string, string>>({});
+  const [soaEndByCustomer, setSoaEndByCustomer] = useState<Record<string, string>>({});
   const [uploadDocumentKind, setUploadDocumentKind] = useState<CustomerUploadDocumentKind>('aop_package');
   const aopFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -35,10 +40,33 @@ export default function Customers() {
     queryFn: () => customersApi.get(selectedId!),
     enabled: !!selectedId,
   });
+  const { data: selectedRelatedAccounts } = useQuery({
+    queryKey: ['customer-related-accounts', selectedId],
+    queryFn: () => customersApi.relatedAccounts(selectedId!),
+    enabled: !!selectedId,
+  });
 
   const items = listData?.items ?? [];
   const total = listData?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const groupedItems = useMemo(() => {
+    const byName = new Map<string, typeof items>();
+    for (const row of items) {
+      const key = row.customer_name.trim().toLowerCase() || row.customer_id.trim().toLowerCase();
+      const existing = byName.get(key);
+      if (existing) existing.push(row);
+      else byName.set(key, [row]);
+    }
+    return Array.from(byName.values()).map((rows) => ({
+      primary: rows[0],
+      rows,
+      otherCount: Math.max(0, rows.length - 1),
+    }));
+  }, [items]);
+  const selectedListItem = useMemo(
+    () => items.find((x) => x.customer_id === selectedId) ?? null,
+    [items, selectedId]
+  );
 
   async function onAopFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -123,71 +151,179 @@ export default function Customers() {
           <div className="border border-slate-200 rounded-lg overflow-hidden max-h-[min(70vh,560px)] overflow-y-auto">
             {isLoading ? (
               <div className="p-4 text-sm text-slate-500">Loading…</div>
-            ) : items.length === 0 ? (
+            ) : groupedItems.length === 0 ? (
               <div className="p-4 text-sm text-slate-500">No customers match. Adjust search or refresh.</div>
             ) : (
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 text-left text-xs text-slate-600 sticky top-0">
                   <tr>
-                    <th className="p-2">Customer ID</th>
                     <th className="p-2">Name</th>
                     <th className="p-2">Account</th>
+                    <th className="p-2">Customer risk</th>
+                    <th className="p-2">Review</th>
                     <th className="p-2 w-28">AOP</th>
+                    <th className="p-2 w-36">SOA</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((row) => (
+                  {groupedItems.map(({ primary, otherCount }) => (
                     <tr
-                      key={row.customer_id}
-                      className={`border-t border-slate-100 cursor-pointer hover:bg-slate-50 ${
-                        selectedId === row.customer_id ? 'bg-sky-50' : ''
+                      key={primary.customer_id}
+                      className={`border-t border-slate-100 hover:bg-slate-50 ${
+                        selectedId === primary.customer_id ? 'bg-sky-50' : ''
                       }`}
-                      onClick={() => {
-                        setSelectedId(row.customer_id);
-                        setMsg(null);
-                      }}
                     >
-                      <td className="p-2 font-mono text-xs">{row.customer_id}</td>
-                      <td className="p-2">{row.customer_name}</td>
-                      <td className="p-2 font-mono text-xs">{row.account_number}</td>
                       <td className="p-2">
-                        {row.aop_on_file &&
-                        row.primary_aop_upload_id &&
-                        (row.primary_aop_filename || row.customer_id) ? (
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <button
+                            type="button"
+                            className="text-left text-slate-900 hover:underline font-medium"
+                            onClick={() => {
+                              setSelectedId(primary.customer_id);
+                              setMsg(null);
+                            }}
+                          >
+                            {primary.customer_name}
+                          </button>
+                          {otherCount > 0 && (
+                            <button
+                              type="button"
+                              className="inline-flex items-center rounded-full bg-indigo-50 text-indigo-800 border border-indigo-200 px-2 py-0.5 text-[11px] font-medium hover:bg-indigo-100"
+                              onClick={(e) => {
+                                navigate(`/customers/${encodeURIComponent(primary.customer_id)}/accounts`);
+                              }}
+                              title={`Show ${otherCount} other account(s)`}
+                            >
+                              +{otherCount} other account{otherCount > 1 ? 's' : ''}
+                            </button>
+                          )}
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-600 truncate" title={primary.contact_email ?? ''}>
+                          {primary.contact_email?.trim() || 'No email on file'}
+                        </div>
+                      </td>
+                      <td className="p-2 font-mono text-xs">{primary.account_number}</td>
+                      <td className="p-2">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium capitalize ${
+                            primary.risk_rating === 'high'
+                              ? 'bg-rose-100 text-rose-800'
+                              : primary.risk_rating === 'low'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}
+                          title="Derived from customer profile and line of business"
+                        >
+                          {primary.risk_rating ?? 'medium'}
+                        </span>
+                        <div className="mt-1 text-[11px] text-slate-600 truncate" title={primary.line_of_business ?? ''}>
+                          {primary.line_of_business?.trim() || 'Line of business not set'}
+                        </div>
+                      </td>
+                      <td className="p-2">
+                        {primary.review_status === 'due' ? (
+                          <span className="inline-flex items-center rounded-full bg-rose-100 text-rose-800 px-2 py-0.5 text-xs font-medium">
+                            Due
+                          </span>
+                        ) : primary.review_status === 'reviewed' ? (
+                          <span className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 text-xs font-medium">
+                            Reviewed
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-800 px-2 py-0.5 text-xs font-medium">
+                            Pending
+                          </span>
+                        )}
+                        <div className="mt-1 text-[11px] text-slate-600">
+                          Next: {primary.next_review_due_at ? String(primary.next_review_due_at).slice(0, 10) : '—'}
+                        </div>
+                        {primary.needs_profile_update ? (
+                          <div className="mt-1">
+                            <span
+                              className="inline-flex items-center rounded-full bg-amber-100 text-amber-900 px-2 py-0.5 text-[10px] font-semibold"
+                              title={(primary.review_recommendations ?? []).join('\n')}
+                            >
+                              Update recommended
+                            </span>
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="p-2">
+                        {primary.aop_on_file &&
+                        primary.primary_aop_upload_id &&
+                        (primary.primary_aop_filename || primary.customer_id) ? (
                           <button
                             type="button"
                             className="text-xs text-sky-700 hover:underline font-medium text-left max-w-[140px] truncate block"
-                            title={row.primary_aop_filename ?? 'Download AOP'}
-                            disabled={aopDownloadingId === `${row.customer_id}:${row.primary_aop_upload_id}`}
+                            title={primary.primary_aop_filename ?? 'Download AOP'}
+                            disabled={aopDownloadingId === `${primary.customer_id}:${primary.primary_aop_upload_id}`}
                             onClick={(e) => {
                               e.stopPropagation();
-                              const key = `${row.customer_id}:${row.primary_aop_upload_id}`;
+                              const key = `${primary.customer_id}:${primary.primary_aop_upload_id}`;
                               setAopDownloadingId(key);
                               void customersApi
                                 .downloadAopUpload(
-                                  row.customer_id,
-                                  row.primary_aop_upload_id!,
-                                  row.primary_aop_filename || 'AOP.pdf'
+                                  primary.customer_id,
+                                  primary.primary_aop_upload_id!,
+                                  primary.primary_aop_filename || 'AOP.pdf'
                                 )
                                 .finally(() => setAopDownloadingId(null));
                             }}
                           >
-                            {aopDownloadingId === `${row.customer_id}:${row.primary_aop_upload_id}`
+                            {aopDownloadingId === `${primary.customer_id}:${primary.primary_aop_upload_id}`
                               ? '…'
-                              : (row.primary_aop_filename ?? 'AOP').replace(/\.pdf$/i, '')}
+                              : (primary.primary_aop_filename ?? 'AOP').replace(/\.pdf$/i, '')}
                           </button>
-                        ) : row.aop_on_file ? (
+                        ) : primary.aop_on_file ? (
                           <span
                             className="inline-flex items-center rounded-full bg-emerald-100 text-emerald-900 px-2 py-0.5 text-xs font-medium"
-                            title={`${row.aop_upload_count ?? 1} file(s) on file`}
+                            title={`${primary.aop_upload_count ?? 1} file(s) on file`}
                           >
-                            Yes{typeof row.aop_upload_count === 'number' && row.aop_upload_count > 1
-                              ? ` (${row.aop_upload_count})`
+                            Yes{typeof primary.aop_upload_count === 'number' && primary.aop_upload_count > 1
+                              ? ` (${primary.aop_upload_count})`
                               : ''}
                           </span>
                         ) : (
                           <span className="text-slate-400 text-xs">—</span>
                         )}
+                      </td>
+                      <td className="p-2">
+                        <div className="flex flex-wrap items-center gap-1">
+                          <input
+                            type="date"
+                            value={soaStartByCustomer[primary.customer_id] || ''}
+                            onChange={(e) =>
+                              setSoaStartByCustomer((prev) => ({ ...prev, [primary.customer_id]: e.target.value }))
+                            }
+                            className="w-[120px] rounded border border-slate-300 px-1.5 py-1 text-[11px]"
+                            title="SOA start date"
+                          />
+                          <input
+                            type="date"
+                            value={soaEndByCustomer[primary.customer_id] || ''}
+                            onChange={(e) =>
+                              setSoaEndByCustomer((prev) => ({ ...prev, [primary.customer_id]: e.target.value }))
+                            }
+                            className="w-[120px] rounded border border-slate-300 px-1.5 py-1 text-[11px]"
+                            title="SOA end date"
+                          />
+                          <button
+                            type="button"
+                            className="text-xs text-violet-700 hover:underline font-medium disabled:opacity-50"
+                            disabled={soaDownloadingId === primary.customer_id}
+                            onClick={() => {
+                              setSoaDownloadingId(primary.customer_id);
+                              void customersApi
+                                .downloadCustomerStatement(primary.customer_id, {
+                                  period_start: soaStartByCustomer[primary.customer_id] || undefined,
+                                  period_end: soaEndByCustomer[primary.customer_id] || undefined,
+                                })
+                                .finally(() => setSoaDownloadingId(null));
+                            }}
+                          >
+                            {soaDownloadingId === primary.customer_id ? 'Preparing…' : 'View / Download SOA'}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -230,12 +366,71 @@ export default function Customers() {
           ) : selectedRow?.kyc ? (
             <div className="space-y-4">
               <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 text-sm">
-                <div className="text-xs font-medium text-slate-500 mb-1">Selected customer</div>
+                <div className="text-xs font-medium text-slate-500 mb-1">Customer profile</div>
                 <div className="font-medium text-slate-900">{selectedRow.kyc.customer_name}</div>
                 <div className="font-mono text-xs text-slate-700 mt-1">{selectedId}</div>
                 <div className="text-xs text-slate-600 mt-1">
-                  Account <span className="font-mono">{selectedRow.kyc.account_number}</span>
+                  Occupation/Line of business: <strong>{selectedRow.kyc.line_of_business || 'Line of business pending update'}</strong>
                 </div>
+                <div className="text-xs text-slate-600 mt-1">
+                  Account class:{' '}
+                  <strong>
+                    {selectedListItem?.account_holder_type === 'corporate' ? 'Corporate current account' : 'Personal account'}
+                  </strong>{' '}
+                  · Product: <strong>{selectedListItem?.account_product || 'savings'}</strong>
+                </div>
+                <div className="text-xs text-slate-600 mt-1">
+                  Ledger: <span className="font-mono">{selectedListItem?.ledger_code || '—'}</span>
+                  {selectedListItem?.account_product === 'current' && selectedListItem?.account_holder_type !== 'corporate' ? (
+                    <>
+                      {' '}
+                      · Reference: <span className="font-mono">{selectedListItem?.account_reference || '—'}</span>
+                    </>
+                  ) : null}
+                </div>
+                <div className="text-xs text-slate-600 mt-1">
+                  On-file email:{' '}
+                  <span className="font-mono">
+                    {selectedListItem?.contact_email?.trim() || `${selectedRow.kyc.customer_name.toLowerCase().replace(/\s+/g, '.')}@example.com`}
+                  </span>
+                </div>
+                <div className="text-xs text-slate-600 mt-1">
+                  Primary account: <span className="font-mono">{selectedRow.kyc.account_number}</span>
+                </div>
+                {selectedRow.risk_reviews?.[0] ? (
+                  <div className="text-xs text-slate-700 mt-2">
+                    Last review: {String(selectedRow.risk_reviews[0].reviewed_at).slice(0, 10)} · Next due:{' '}
+                    {String(selectedRow.risk_reviews[0].next_review_due_at).slice(0, 10)} · Rating:{' '}
+                    <strong>{selectedRow.risk_reviews[0].risk_rating}</strong>
+                  </div>
+                ) : (
+                  <div className="text-xs text-amber-700 mt-2">No periodic review captured yet.</div>
+                )}
+                {!!selectedRelatedAccounts?.items?.length && (
+                  <div className="mt-2 text-xs text-slate-700">
+                    Linked accounts:
+                    <ul className="mt-1 space-y-1">
+                      {selectedRelatedAccounts.items.map((acc) => (
+                        <li key={acc.customer_id} className="font-mono">
+                          {acc.account_number || '—'}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {!!selectedRow.linked_companies?.length && (
+                  <div className="mt-2 text-xs text-slate-700">
+                    Director/shareholder-linked company accounts:
+                    <ul className="mt-1 space-y-1">
+                      {selectedRow.linked_companies.map((c) => (
+                        <li key={`${c.company_customer_id}:${c.company_account_number}`}>
+                          <span className="font-medium">{c.company_name}</span> ({c.relationship_role}) ·{' '}
+                          <span className="font-mono">{c.company_account_number}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {selectedRow.aop_uploads?.some((u) => u.persisted !== false) ? (
                   <p className="text-xs text-emerald-800 mt-2 font-medium">
                     AOP on file — saved to the customer record (database).
@@ -245,31 +440,33 @@ export default function Customers() {
                 ) : null}
               </div>
 
-              <label className="block text-xs font-medium text-slate-600 mb-1">File category (required)</label>
-              <select
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm mb-3"
-                value={uploadDocumentKind}
-                onChange={(e) => setUploadDocumentKind(e.target.value as CustomerUploadDocumentKind)}
-              >
-                <option value="aop_package">Account opening package (AOP)</option>
-                <option value="profile_change">Profile / identity change evidence</option>
-                <option value="cash_threshold">Cash deposit or withdrawal (threshold) evidence</option>
-              </select>
-              <input
-                ref={aopFileInputRef}
-                type="file"
-                accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
-                className="hidden"
-                onChange={onAopFileSelected}
-              />
-              <button
-                type="button"
-                onClick={openFilePicker}
-                disabled={busy === 'aop-upload'}
-                className="w-full px-4 py-3 rounded-lg bg-emerald-700 text-white text-sm font-medium hover:bg-emerald-600 disabled:opacity-50"
-              >
-                {busy === 'aop-upload' ? 'Uploading…' : 'Choose file to upload'}
-              </button>
+              <div className="rounded-lg border border-violet-200 bg-violet-50 p-3">
+                <div className="text-sm font-semibold text-violet-900 mb-2">Periodic risk checklist (latest review)</div>
+                {(() => {
+                  const rr = selectedRow.risk_reviews?.[0];
+                  const item = (label: string, v: unknown) => (
+                    <li className="flex items-center justify-between gap-2 text-xs py-1 border-b border-violet-100 last:border-b-0">
+                      <span>{label}</span>
+                      <span className={`rounded-full px-2 py-0.5 font-medium ${v === true ? 'bg-emerald-100 text-emerald-800' : v === false ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-700'}`}>
+                        {v === true ? 'Yes' : v === false ? 'No' : '—'}
+                      </span>
+                    </li>
+                  );
+                  return (
+                    <ul className="space-y-0.5">
+                      {item('Is customer a PEP?', rr?.pep_flag)}
+                      {item('Has profile changed (e.g. student to professional)?', rr?.profile_changed)}
+                      {item('Any account update in period?', rr?.account_update_within_period)}
+                      {item('Any management approval in period?', rr?.management_approval_within_period)}
+                      {item('Age commensurate with profile?', rr?.age_commensurate)}
+                      {item('Activity commensurate with profile?', rr?.activity_commensurate)}
+                      {item('Turnover matches profile?', rr?.expected_turnover_match)}
+                      {item('Lodgement matches profile?', rr?.expected_lodgement_match)}
+                      {item('Expected activity matches profile?', rr?.expected_activity_match)}
+                    </ul>
+                  );
+                })()}
+              </div>
 
               {selectedRow.aop_uploads && selectedRow.aop_uploads.length > 0 && (
                 <div>
@@ -365,6 +562,34 @@ export default function Customers() {
                   </ul>
                 </div>
               )}
+
+              <div className="pt-2 border-t border-slate-200">
+                <label className="block text-xs font-medium text-slate-600 mb-1">AOP file category (required)</label>
+                <select
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm mb-3"
+                  value={uploadDocumentKind}
+                  onChange={(e) => setUploadDocumentKind(e.target.value as CustomerUploadDocumentKind)}
+                >
+                  <option value="aop_package">Account opening package (AOP)</option>
+                  <option value="profile_change">Profile / identity change evidence</option>
+                  <option value="cash_threshold">Cash deposit or withdrawal (threshold) evidence</option>
+                </select>
+                <input
+                  ref={aopFileInputRef}
+                  type="file"
+                  accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                  className="hidden"
+                  onChange={onAopFileSelected}
+                />
+                <button
+                  type="button"
+                  onClick={openFilePicker}
+                  disabled={busy === 'aop-upload'}
+                  className="w-full px-4 py-3 rounded-lg bg-emerald-700 text-white text-sm font-medium hover:bg-emerald-600 disabled:opacity-50"
+                >
+                  {busy === 'aop-upload' ? 'Uploading…' : 'Choose file to upload'}
+                </button>
+              </div>
             </div>
           ) : (
             <p className="text-sm text-red-700">Could not load this customer.</p>

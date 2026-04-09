@@ -3,6 +3,8 @@ import ProtectedRoute from './components/ProtectedRoute';
 import Dashboard from './pages/Dashboard';
 import Transactions from './pages/Transactions';
 import Customers from './pages/Customers';
+import RiskReviews from './pages/RiskReviews';
+import CustomerAccounts from './pages/CustomerAccounts';
 import Alerts from './pages/Alerts';
 import Reports from './pages/Reports';
 import Analytics from './pages/Analytics';
@@ -20,6 +22,8 @@ function App() {
       <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
       <Route path="/transactions" element={<ProtectedRoute><Transactions /></ProtectedRoute>} />
       <Route path="/customers" element={<ProtectedRoute><Customers /></ProtectedRoute>} />
+      <Route path="/risk-reviews" element={<ProtectedRoute><RiskReviews /></ProtectedRoute>} />
+      <Route path="/customers/:customerId/accounts" element={<ProtectedRoute><CustomerAccounts /></ProtectedRoute>} />
       <Route path="/alerts" element={<ProtectedRoute><Alerts /></ProtectedRoute>} />
       <Route path="/reports" element={<ProtectedRoute><Reports /></ProtectedRoute>} />
       <Route path="/analytics" element={<ProtectedRoute><Analytics /></ProtectedRoute>} />

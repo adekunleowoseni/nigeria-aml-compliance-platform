@@ -4,7 +4,12 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from app.db.postgres_client import PostgresClient
-from app.services.str_word_generator import CustomerKyc, build_customer_kyc, infer_line_of_business_from_txn
+from app.services.str_word_generator import (
+    CustomerKyc,
+    build_customer_kyc,
+    infer_line_of_business_from_customer_id,
+    infer_line_of_business_from_txn,
+)
 
 # Fallback when Postgres insert fails (e.g. readonly / transient errors)
 _MEMORY_KYC: Dict[str, CustomerKyc] = {}
@@ -73,12 +78,14 @@ def _row_to_customer(row: Dict[str, Any]) -> CustomerKyc:
         exp_f = float(exp) if exp is not None else None
     except (TypeError, ValueError):
         exp_f = None
+    lob_raw = str(row.get("line_of_business") or "").strip()
+    lob = lob_raw or infer_line_of_business_from_customer_id(str(row.get("customer_id") or "")) or "Occupation not stated"
     return CustomerKyc(
         customer_name=str(row["customer_name"]),
         account_number=str(row["account_number"]),
         account_opened=_as_date(row["account_opened"]),
         customer_address=str(row["customer_address"]),
-        line_of_business=str(row["line_of_business"]),
+        line_of_business=lob,
         phone_number=str(row["phone_number"]),
         date_of_birth=_as_date(row["date_of_birth"]),
         id_number=str(row["id_number"]),
@@ -247,7 +254,7 @@ async def upsert_customer_kyc_explicit(
         account_number=(account_number or "").strip() or "—",
         account_opened=account_opened,
         customer_address=(customer_address or "").strip() or "—",
-        line_of_business=(line_of_business or "").strip() or "—",
+        line_of_business=(line_of_business or "").strip() or "Occupation not stated",
         phone_number=(phone_number or "").strip() or "—",
         date_of_birth=date_of_birth,
         id_number=(id_number or "").strip() or "—",

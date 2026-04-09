@@ -15,6 +15,7 @@ const baseNavCore = [
   { to: '/', label: 'Dashboard' },
   { to: '/transactions', label: 'Transactions' },
   { to: '/customers', label: 'Customers' },
+  { to: '/risk-reviews', label: 'Risk reviews' },
   { to: '/alerts', label: 'Alerts' },
 ];
 
