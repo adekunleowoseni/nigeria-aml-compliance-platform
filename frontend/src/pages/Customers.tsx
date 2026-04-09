@@ -147,6 +147,32 @@ export default function Customers() {
             >
               Refresh
             </button>
+            <button
+              type="button"
+              disabled={busy === 'review-all'}
+              onClick={async () => {
+                setMsg(null);
+                setBusy('review-all');
+                try {
+                  const res = await customersApi.autoReviewAll({ only_due: false, limit: 5000 });
+                  setMsg({
+                    type: 'ok',
+                    text: `Automatic review completed. Reviewed ${res.processed} account(s), skipped ${res.skipped}.`,
+                  });
+                  await qc.invalidateQueries({ queryKey: ['customers'], exact: false });
+                  await qc.invalidateQueries({ queryKey: ['customer'], exact: false });
+                  await refetch();
+                } catch (err) {
+                  setMsg({ type: 'err', text: (err as Error).message });
+                } finally {
+                  setBusy(null);
+                }
+              }}
+              className="px-3 py-2 text-sm rounded-lg bg-slate-800 text-white hover:bg-slate-900 disabled:opacity-50"
+              title="Run automatic periodic review for all customer accounts"
+            >
+              {busy === 'review-all' ? 'Reviewing…' : 'Review all accounts'}
+            </button>
           </div>
           <div className="border border-slate-200 rounded-lg overflow-hidden max-h-[min(70vh,560px)] overflow-y-auto">
             {isLoading ? (

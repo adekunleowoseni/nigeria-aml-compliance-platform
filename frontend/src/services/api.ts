@@ -717,6 +717,11 @@ export const customersApi = {
       sent: Array<{ customer_id: string; recipient_email: string; recipient_role: string; log_id: string }>;
       failures: Array<{ customer_id: string; recipient_email: string; error: string }>;
     }>('/customers/risk-reviews/alerts/send', { method: 'POST', body: JSON.stringify(body) }),
+  autoReviewAll: (body?: { only_due?: boolean; limit?: number }) =>
+    request<{ status: string; processed: number; skipped: number; only_due: boolean }>(
+      '/customers/risk-reviews/review-all',
+      { method: 'POST', body: JSON.stringify(body ?? {}) }
+    ),
   getReviewRules: () =>
     request<{
       rules: {

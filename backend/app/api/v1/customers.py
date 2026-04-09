@@ -156,6 +156,11 @@ class CustomerRiskReviewAlertBody(BaseModel):
     mode: Literal["individual", "bulk"] = "individual"
 
 
+class CustomerRiskReviewAutoAllBody(BaseModel):
+    only_due: bool = False
+    limit: int = Field(default=5000, ge=1, le=20000)
+
+
 class CustomerReviewRulesBody(BaseModel):
     high_months: int = Field(default=12, ge=1, le=120)
     medium_months: int = Field(default=18, ge=1, le=120)
@@ -955,6 +960,83 @@ async def send_due_customer_review_alerts(
         details={"mode": body.mode, "sent": len(sent), "failed": len(failures)},
     )
     return {"status": "ok", "sent": sent, "failures": failures}
+
+
+@router.post("/risk-reviews/review-all")
+async def auto_review_all_customers(
+    request: Request,
+    body: CustomerRiskReviewAutoAllBody,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    pg = getattr(request.app.state, "pg", None)
+    rules = await get_customer_review_rules(pg)
+    rows, _ = await list_customers_kyc(
+        pg,
+        limit=int(body.limit),
+        offset=0,
+        q=None,
+        merge_demo_sources=settings.app_env == "development",
+    )
+    processed = 0
+    skipped = 0
+    today = date.today()
+    for r in rows:
+        cid = str(r.get("customer_id") or "").strip()
+        if not cid:
+            continue
+        kyc = await fetch_customer_kyc_any(pg, cid)
+        if not kyc:
+            skipped += 1
+            continue
+        inferred = _derive_customer_risk_rating(kyc, _recent_customer_txn_stats(cid, days=30))
+        previous = await latest_review_for_customer(pg, cid)
+        previous_rating = str(previous.get("risk_rating") or "") if previous else None
+        last_date = today
+        if body.only_due:
+            due_at = previous.get("next_review_due_at") if previous else None
+            if not (hasattr(due_at, "isoformat") and due_at <= today):
+                skipped += 1
+                continue
+        next_due = add_review_cycle_with_rules(last_date, inferred, rules)
+        recommendation = "Automatic periodic review generated from profile and recent activity."
+        review = await upsert_customer_risk_review(
+            pg,
+            {
+                "customer_id": cid,
+                "reviewed_at": last_date,
+                "risk_rating": normalize_risk_rating(inferred),
+                "previous_risk_rating": previous_rating or None,
+                "next_review_due_at": next_due,
+                "id_card_expiry_at": None,
+                "bvn_linked_accounts_count": 0,
+                "profile_changed": False,
+                "account_update_within_period": False,
+                "management_approval_within_period": False,
+                "age_commensurate": True,
+                "activity_commensurate": True,
+                "pep_flag": False,
+                "expected_turnover_match": True,
+                "expected_activity_match": True,
+                "expected_lodgement_match": True,
+                "suggested_risk_profile": inferred,
+                "recommendation": recommendation,
+                "status": "reviewed",
+                "checklist_json": {
+                    "auto_generated": True,
+                    "source": "customers.risk-reviews.review-all",
+                },
+            },
+        )
+        _ = review
+        processed += 1
+    audit_trail.record_event_from_user(
+        user,
+        action="customer.risk_review.auto_review_all",
+        resource_type="customer",
+        resource_id="bulk",
+        details={"processed": processed, "skipped": skipped, "only_due": bool(body.only_due), "limit": int(body.limit)},
+    )
+    return {"status": "ok", "processed": processed, "skipped": skipped, "only_due": bool(body.only_due)}
 
 
 @router.get("/admin/review-rules")
