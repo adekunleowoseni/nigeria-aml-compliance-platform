@@ -114,6 +114,9 @@ export default function Reports() {
   const [coAiHelperOpen, setCoAiHelperOpen] = useState(false);
   const [coAiInstruction, setCoAiInstruction] = useState('');
   const [coAiCopyFeedback, setCoAiCopyFeedback] = useState(false);
+  const [coAiReply, setCoAiReply] = useState('');
+  const [coAiBusy, setCoAiBusy] = useState(false);
+  const [coAiError, setCoAiError] = useState<string | null>(null);
 
   const [sarModalSelectedIds, setSarModalSelectedIds] = useState<string[]>([]);
   const [sarModalSearch, setSarModalSearch] = useState('');
@@ -632,6 +635,20 @@ export default function Reports() {
       setCoAiCopyFeedback(false);
     }
   }, [coAiComposedPrompt]);
+
+  useEffect(() => {
+    if (!strDraftModalAlertId) {
+      setCoAiHelperOpen(false);
+      setCoAiInstruction('');
+      setCoAiCopyFeedback(false);
+      setCoAiReply('');
+      setCoAiBusy(false);
+      setCoAiError(null);
+      return;
+    }
+    setCoAiReply('');
+    setCoAiError(null);
+  }, [strDraftModalAlertId]);
 
   const ctrMutation = useMutation({
     mutationFn: () => reportsApi.generateCTR({}),
@@ -2041,7 +2058,7 @@ export default function Reports() {
           aria-labelledby="co-str-draft-modal-title"
         >
           <div
-            className="bg-white rounded-xl shadow-xl max-w-6xl w-full p-6 max-h-[90vh] overflow-y-auto relative"
+            className="bg-white rounded-xl shadow-xl max-w-6xl w-full p-6 pb-24 max-h-[90vh] overflow-y-auto relative"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-4 mb-3">
@@ -2207,13 +2224,14 @@ export default function Reports() {
               AI
             </button>
             {coAiHelperOpen && (
-              <div className="absolute bottom-20 right-4 w-[380px] max-w-[min(90vw,calc(100%-2rem))] rounded-lg border border-indigo-200 bg-white shadow-xl p-3 z-20 flex flex-col gap-2">
-                <p className="text-xs font-semibold text-slate-800">AI chat</p>
+              <div className="absolute bottom-20 right-4 w-[400px] max-w-[min(90vw,calc(100%-2rem))] max-h-[min(70vh,520px)] overflow-y-auto rounded-lg border border-indigo-200 bg-white shadow-xl p-3 z-20 flex flex-col gap-2">
+                <p className="text-xs font-semibold text-slate-800">AI assistant</p>
                 <p className="text-[11px] text-slate-500">
-                  Add your instruction, copy the prompt below, and paste it into your AI chat. Paste the reply back into the
-                  editor if you want to use it.
+                  Sends the composed prompt to the server LLM (configured via <code className="text-[10px]">LLM_PROVIDER</code>{' '}
+                  and <code className="text-[10px]">GEMINI_API_KEY</code> / <code className="text-[10px]">OPENAI_API_KEY</code> /
+                  Ollama in the API environment).
                 </p>
-                <label className="text-[11px] font-medium text-slate-600">Your message</label>
+                <label className="text-[11px] font-medium text-slate-600">Your instruction</label>
                 <textarea
                   value={coAiInstruction}
                   onChange={(e) => setCoAiInstruction(e.target.value)}
@@ -2221,27 +2239,62 @@ export default function Reports() {
                   placeholder="Example: Make this STR concise, plain-English, and suitable for NFIU filing."
                   className="w-full rounded border border-slate-300 px-2 py-1.5 text-xs"
                 />
-                <p className="text-[11px] font-medium text-slate-600">Composed prompt</p>
-                <div className="max-h-40 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 text-[11px] whitespace-pre-wrap">
+                <p className="text-[11px] font-medium text-slate-600">Prompt sent to the model</p>
+                <div className="max-h-28 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 text-[11px] whitespace-pre-wrap">
                   {coAiComposedPrompt}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={!coAiComposedPrompt.trim() || coAiBusy}
+                    onClick={async () => {
+                      const text = coAiComposedPrompt.trim();
+                      if (!text) return;
+                      setCoAiBusy(true);
+                      setCoAiError(null);
+                      try {
+                        const res = await reportsApi.strDraftAiAssist({ prompt: text });
+                        setCoAiReply(res.content || '');
+                      } catch (e) {
+                        setCoAiReply('');
+                        setCoAiError(e instanceof Error ? e.message : 'Request failed');
+                      } finally {
+                        setCoAiBusy(false);
+                      }
+                    }}
+                    className="px-3 py-1.5 text-xs rounded-md bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    {coAiBusy ? 'Generating…' : 'Generate'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!coAiComposedPrompt.trim() || coAiBusy}
+                    onClick={() => copyCoAiComposedPrompt()}
+                    className="px-3 py-1.5 text-xs rounded-md border border-indigo-200 bg-indigo-50 text-indigo-900 hover:bg-indigo-100 disabled:opacity-50"
+                  >
+                    {coAiCopyFeedback ? 'Copied' : 'Copy prompt'}
+                  </button>
+                </div>
+                {coAiError ? (
+                  <p className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1" role="alert">
+                    {coAiError}
+                  </p>
+                ) : null}
+                <label className="text-[11px] font-medium text-slate-600">Model reply</label>
+                <div className="min-h-[72px] max-h-36 overflow-auto rounded border border-slate-200 bg-white p-2 text-[11px] whitespace-pre-wrap text-slate-800">
+                  {coAiReply || (coAiBusy ? '…' : '—')}
                 </div>
                 <button
                   type="button"
-                  disabled={!coAiComposedPrompt.trim()}
-                  onClick={async () => {
-                    const text = coAiComposedPrompt.trim();
-                    if (!text) return;
-                    try {
-                      await navigator.clipboard.writeText(text);
-                      setCoAiCopyFeedback(true);
-                      window.setTimeout(() => setCoAiCopyFeedback(false), 2000);
-                    } catch {
-                      setCoAiCopyFeedback(false);
-                    }
+                  disabled={!coAiReply.trim() || !strDraftModalAlertId}
+                  onClick={() => {
+                    const aid = strDraftModalAlertId;
+                    if (!aid || !coAiReply.trim()) return;
+                    setStrDraftNotesById((prev) => ({ ...prev, [aid]: coAiReply.trim() }));
                   }}
-                  className="self-start px-3 py-1.5 text-xs rounded-md border border-indigo-200 bg-indigo-50 text-indigo-900 hover:bg-indigo-100 disabled:opacity-50"
+                  className="self-start px-3 py-1.5 text-xs rounded-md border border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 disabled:opacity-50"
                 >
-                  {coAiCopyFeedback ? 'Copied' : 'Copy prompt'}
+                  Replace editor text with reply
                 </button>
               </div>
             )}

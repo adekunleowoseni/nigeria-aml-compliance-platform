@@ -70,6 +70,118 @@ _OTC_WORD_DRAFT_MAX_CHARS = 32000
 _generator = GoAMLGenerator()
 
 
+def customer_report_history_summary(customer_id: str, *, limit: int = 5) -> Dict[str, Any]:
+    """Return filing counts and recent report history for a customer."""
+    cid = str(customer_id or "").strip()
+    if not cid:
+        return {"total": 0, "counts": {}, "recent": []}
+    matches: List[Dict[str, Any]] = []
+    for rid, rec in _REPORTS.items():
+        if not isinstance(rec, dict):
+            continue
+        if not _report_not_soft_deleted(rec):
+            continue
+        rec_cid = str(rec.get("customer_id") or "").strip()
+        if rec_cid != cid:
+            continue
+        rtype = str(rec.get("type") or "").strip().upper() or "UNKNOWN"
+        status = str(rec.get("status") or "").strip().lower() or "draft"
+        ts = str(rec.get("generated_at") or rec.get("created_at") or "")
+        matches.append(
+            {
+                "report_id": str(rid),
+                "type": rtype,
+                "status": status,
+                "generated_at": ts or None,
+            }
+        )
+    counts: Dict[str, int] = {}
+    for row in matches:
+        key = str(row.get("type") or "UNKNOWN")
+        counts[key] = int(counts.get(key, 0)) + 1
+    matches.sort(key=lambda x: str(x.get("generated_at") or ""), reverse=True)
+    return {"total": len(matches), "counts": counts, "recent": matches[: max(1, int(limit))]}
+
+
+def _report_history_rows_filtered(
+    *,
+    customer_id: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> List[Dict[str, Any]]:
+    cid = str(customer_id or "").strip()
+    start = str(start_date or "").strip()
+    end = str(end_date or "").strip()
+    rows: List[Dict[str, Any]] = []
+    for rid, rec in _REPORTS.items():
+        if not isinstance(rec, dict):
+            continue
+        if not _report_not_soft_deleted(rec):
+            continue
+        rec_cid = str(rec.get("customer_id") or "").strip()
+        if cid and rec_cid != cid:
+            continue
+        ts = str(rec.get("generated_at") or rec.get("created_at") or "").strip()
+        day = ts[:10] if len(ts) >= 10 else ""
+        if start and day and day < start:
+            continue
+        if end and day and day > end:
+            continue
+        rtype = str(rec.get("type") or "").strip().upper() or "UNKNOWN"
+        status = str(rec.get("status") or "").strip().lower() or "draft"
+        rows.append(
+            {
+                "report_id": str(rid),
+                "customer_id": rec_cid,
+                "type": rtype,
+                "status": status,
+                "generated_at": ts or None,
+            }
+        )
+    rows.sort(key=lambda x: str(x.get("generated_at") or ""), reverse=True)
+    return rows
+
+
+@router.get("/history")
+async def get_customer_report_history(
+    customer_id: Optional[str] = Query(None, min_length=2, max_length=128),
+    start_date: Optional[str] = Query(None, description="Inclusive date filter (YYYY-MM-DD)."),
+    end_date: Optional[str] = Query(None, description="Inclusive date filter (YYYY-MM-DD)."),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Searchable report timeline by customer ID for CCO/admin review.
+    """
+    cid = str(customer_id or "").strip()
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"admin", "chief_compliance_officer", "compliance_officer"}:
+        raise HTTPException(status_code=403, detail="Compliance, CCO, or admin role required.")
+    if start_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(start_date)):
+        raise HTTPException(status_code=400, detail="start_date must be YYYY-MM-DD")
+    if end_date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(end_date)):
+        raise HTTPException(status_code=400, detail="end_date must be YYYY-MM-DD")
+    if start_date and end_date and str(start_date) > str(end_date):
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
+
+    rows = _report_history_rows_filtered(customer_id=cid or None, start_date=start_date, end_date=end_date)
+    counts: Dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("type") or "UNKNOWN")
+        counts[key] = int(counts.get(key, 0)) + 1
+    total = len(rows)
+    page_items = rows[skip : skip + limit]
+    return {
+        "customer_id": cid or None,
+        "total": total,
+        "counts": counts,
+        "skip": skip,
+        "limit": limit,
+        "items": page_items,
+    }
+
+
 async def _load_report_profile(request: Request) -> Dict[str, Any]:
     pg = getattr(request.app.state, "pg", None)
     if not pg:
@@ -91,6 +203,8 @@ def _persist_report_with_audit(
     *,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
+    if not rec.get("generated_at"):
+        rec["generated_at"] = datetime.utcnow().isoformat() + "Z"
     _REPORTS[report_id] = rec
     audit_trail.record_report_generated(user, report_id, rec, extra=extra)
 
@@ -1003,6 +1117,57 @@ async def generate_str_bulk(
 
     ok_n = sum(1 for r in results if r.get("ok"))
     return {"results": results, "generated": ok_n, "requested": len(ids_ordered)}
+
+
+_STR_DRAFT_AI_PROMPT_MAX = 48000
+
+_STR_DRAFT_AI_SYSTEM = (
+    "You are an AML compliance reporting assistant helping draft Suspicious Transaction Report (STR) narrative text "
+    "for the Nigerian regulatory context. Follow user instructions precisely. Preserve facts, amounts, dates, names, "
+    "and account identifiers; improve clarity and professional tone only. Do not invent facts. "
+    "Output plain text only (no markdown code fences unless explicitly requested)."
+)
+
+
+@router.post("/str/draft/ai-assist")
+async def str_draft_ai_assist(
+    payload: Dict[str, Any],
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Run the configured LLM (GEMINI_API_KEY / OPENAI_API_KEY / Ollama per settings) on the STR draft helper prompt.
+    """
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required")
+    if len(prompt) > _STR_DRAFT_AI_PROMPT_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"prompt exceeds {_STR_DRAFT_AI_PROMPT_MAX} characters",
+        )
+    try:
+        from app.services.llm.client import get_llm_client
+
+        client = get_llm_client()
+        result = await client.generate(prompt, system=_STR_DRAFT_AI_SYSTEM, temperature=0.35)
+        content = (result.content or "").strip()
+        audit_trail.record_event_from_user(
+            user,
+            action="report.str_draft.ai_assist",
+            resource_type="reports",
+            resource_id="str-draft-ai",
+            details={
+                "prompt_chars": len(prompt),
+                "provider": result.provider,
+                "model": result.model,
+                "reply_chars": len(content),
+            },
+        )
+        return {"content": content, "provider": result.provider, "model": result.model}
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {e!s}") from e
 
 
 @router.get("/str/draft/{alert_id}")

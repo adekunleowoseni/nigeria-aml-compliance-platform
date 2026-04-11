@@ -731,6 +731,7 @@ export const customersApi = {
         student_monthly_turnover_recommend_corporate_ngn: number;
         id_expiry_warning_days: number;
         require_additional_docs_when_monthly_turnover_above_ngn: number;
+        scenario_rules_json?: Record<string, number>;
       };
     }>('/customers/admin/review-rules'),
   putReviewRules: (body: {
@@ -740,6 +741,7 @@ export const customersApi = {
     student_monthly_turnover_recommend_corporate_ngn: number;
     id_expiry_warning_days: number;
     require_additional_docs_when_monthly_turnover_above_ngn: number;
+    scenario_rules_json?: Record<string, number>;
   }) =>
     request<{
       status: string;
@@ -750,6 +752,7 @@ export const customersApi = {
         student_monthly_turnover_recommend_corporate_ngn: number;
         id_expiry_warning_days: number;
         require_additional_docs_when_monthly_turnover_above_ngn: number;
+        scenario_rules_json?: Record<string, number>;
       };
     }>('/customers/admin/review-rules', { method: 'PUT', body: JSON.stringify(body) }),
   relatedAccounts: (customerId: string) =>
@@ -924,6 +927,14 @@ export type Alert = {
     channel?: string | null;
     created_at?: string | null;
     seeded_by_alert?: boolean;
+  }>;
+  report_history_total?: number;
+  report_history_counts?: Record<string, number>;
+  report_history_recent?: Array<{
+    report_id: string;
+    type: string;
+    status: string;
+    generated_at?: string | null;
   }>;
   investigation_history?: Array<Record<string, unknown>>;
   created_at: string;
@@ -1253,6 +1264,33 @@ export const complianceApi = {
 };
 
 export const reportsApi = {
+  customerHistory: (params?: {
+    customerId?: string;
+    startDate?: string;
+    endDate?: string;
+    skip?: number;
+    limit?: number;
+  }) =>
+    request<{
+      customer_id?: string | null;
+      total: number;
+      counts: Record<string, number>;
+      skip: number;
+      limit: number;
+      items: Array<{
+        report_id: string;
+        customer_id?: string;
+        type: string;
+        status: string;
+        generated_at?: string | null;
+      }>;
+    }>(`/reports/history${auditQueryString({
+      customer_id: params?.customerId,
+      start_date: params?.startDate,
+      end_date: params?.endDate,
+      skip: params?.skip ?? 0,
+      limit: params?.limit ?? 50,
+    })}`),
   listStrEligibleAlerts: (limit = 500) =>
     request<{ items: Alert[]; total: number }>(`/reports/str/eligible-alerts?limit=${limit}`),
   generateSTR: (body: {
@@ -1334,6 +1372,12 @@ export const reportsApi = {
     request<{ items: Record<string, boolean> }>('/reports/str/draft/status', {
       method: 'POST',
       body: JSON.stringify({ alert_ids: alertIds }),
+    }),
+  /** STR draft modal: server-side LLM using env API keys (llm_provider + GEMINI_API_KEY / OPENAI_API_KEY / Ollama). */
+  strDraftAiAssist: (body: { prompt: string }) =>
+    request<{ content: string; provider: string; model: string }>('/reports/str/draft/ai-assist', {
+      method: 'POST',
+      body: JSON.stringify(body),
     }),
   getOtcWordDraftPreview: (alertId: string) =>
     request<{

@@ -77,12 +77,14 @@ services:
     ports:
       - "9092:9092"
     healthcheck:
-      # Lighter than kafka-topics; broker often needs 60–120s on first start
-      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      # Use 127.0.0.1 (not localhost): on some Windows Docker setups localhost resolves to ::1
+      # while the broker listens on IPv4 only, so the check fails until marked unhealthy.
+      # Lighter than kafka-topics; broker often needs 60–180s on first start / low-RAM hosts.
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server 127.0.0.1:9092 >/dev/null 2>&1"]
       interval: 10s
       timeout: 15s
-      retries: 30
-      start_period: 120s
+      retries: 35
+      start_period: 180s
     restart: unless-stopped
     networks: [aml-net]
 

@@ -66,6 +66,8 @@ Requirements:
   filing basis, rationale, and any analyst extension notes into fluent prose.
 - If extension notes are provided, fold them in naturally. Do not add a separate "Additional notes" paragraph that only
   repeats the same facts unless genuinely needed for clarity.
+- Section I already contains the exact "Nature of Unusual Activity" line below—do not paste it again verbatim or restate the
+  same sentence twice; at most refer to it once in passing.
 - Align with CBN AML/CFT supervisory expectations: factual, cautious, professional; describe observations and internal
   control steps; do not assert criminal guilt.
 - Output plain English only: 2–4 short paragraphs, no markdown, no numbered lists unless essential.
@@ -120,6 +122,29 @@ def _reporting_line(is_transaction_report: bool) -> str:
     )
 
 
+def _dedupe_paragraph_blocks(text: str) -> str:
+    """Remove exact duplicate blocks (common when the LLM repeats a paragraph)."""
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+    seen: set[str] = set()
+    out: list[str] = []
+    for b in blocks:
+        if b in seen:
+            continue
+        seen.add(b)
+        out.append(b)
+    return "\n\n".join(out)
+
+
+def _strip_verbatim_section_i_echo(reasons_body: str, nature_line: str) -> str:
+    """Drop a paragraph that only repeats the Section I nature line (LLM echo)."""
+    n = (nature_line or "").strip()
+    if len(n) < 12:
+        return reasons_body
+    blocks = [b.strip() for b in reasons_body.split("\n\n") if b.strip()]
+    out = [b for b in blocks if b != n]
+    return "\n\n".join(out)
+
+
 def _fallback_reasons_body(
     *,
     nature_label: str,
@@ -127,24 +152,34 @@ def _fallback_reasons_body(
     reason_detail: str,
     officer_rationale: str,
     estr_notes: str,
-    customer_name: str,
 ) -> str:
-    detail = (reason_detail or "").strip()
     rat = (officer_rationale or "").strip()
     ext = (estr_notes or "").strip()
-    parts = [
-        f"The institution is filing this OTC return following identification of unusual activity categorised as: {nature_label}. "
-        f"The compliance officer selected the following basis for filing: {reason_label}."
-    ]
-    if detail:
-        parts.append(f"Additional context recorded for the filing basis: {detail}")
+    if rat and ext and rat == ext:
+        ext = ""
+
+    nature_s = (nature_label or "").strip()
+    # `nature_of_unusual_activity_from_otc` already embeds subject, filing-reason label, and detail in one line; do not
+    # repeat reason_label / detail again (that was duplicating text in the Word output).
+    if nature_s and nature_s not in ("Not specified", "—"):
+        parts: list[str] = [
+            f"The institution is filing this OTC return following identification of unusual activity categorised as: {nature_s}. "
+            "The narrative below reflects the compliance assessment, officer rationale, and any analyst notes on file."
+        ]
+    else:
+        detail = (reason_detail or "").strip()
+        parts = [
+            f"The institution is filing this OTC return. The compliance officer selected the following basis for filing: {reason_label}."
+        ]
+        if detail:
+            parts.append(f"Additional context recorded for the filing basis: {detail}")
+
     if rat:
         parts.append(f"Officer assessment and rationale: {rat}")
     if ext:
         parts.append(f"Supplementary extension notes: {ext}")
     parts.append(
-        f"The subject customer ({customer_name}) is known to the bank; the narrative above reflects the current "
-        "understanding pending completion of enhanced due diligence and any required regulatory follow-up."
+        "This understanding remains subject to enhanced due diligence and any required regulatory follow-up."
     )
     return "\n\n".join(parts)
 
@@ -181,21 +216,22 @@ async def refine_estr_reasons_for_filing(
         body = re.sub(r"```[a-zA-Z]*\s*", "", body)
         body = body.strip()
         if len(body) > 80:
+            body = _dedupe_paragraph_blocks(body)
+            body = _strip_verbatim_section_i_echo(body, nature_line_section_i)
             return body, "llm"
     except Exception as exc:
         log.info("estr_reasons_llm_skipped err=%s", exc)
 
-    return (
-        _fallback_reasons_body(
-            nature_label=nature_line_section_i,
-            reason_label=reason_label,
-            reason_detail=reason_detail,
-            officer_rationale=officer_rationale,
-            estr_notes=estr_notes,
-            customer_name=customer_name,
-        ),
-        "template",
+    fb = _fallback_reasons_body(
+        nature_label=nature_line_section_i,
+        reason_label=reason_label,
+        reason_detail=reason_detail,
+        officer_rationale=officer_rationale,
+        estr_notes=estr_notes,
     )
+    fb = _dedupe_paragraph_blocks(fb)
+    fb = _strip_verbatim_section_i_echo(fb, nature_line_section_i)
+    return fb, "template"
 
 
 def _add_title(doc: Document, text: str) -> None:
